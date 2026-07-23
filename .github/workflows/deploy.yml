@@ -2,9 +2,7 @@
 # ABOUTME: Public site is SVG-only until an optimized art subset is committed (see plan Task 16 decision gate).
 name: Deploy to GitHub Pages
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+  workflow_dispatch
 permissions:
   contents: read
   pages: write
