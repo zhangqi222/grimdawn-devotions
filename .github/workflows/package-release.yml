@@ -1,0 +1,53 @@
+name: Package Dist Release
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-package-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Build static website
+        run: |
+          just web-install
+          just build
+
+      - name: Compress dist to dist.zip
+        run: |
+          cd web
+          zip -r dist.zip dist
+          mv dist.zip ../
+
+      - name: Create YYYYMMDD tag & Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE_TAG=$(date +"%Y%m%d")
+          if git rev-parse "tags/$DATE_TAG" >/dev/null 2>&1; then
+            echo "Tag $DATE_TAG exists, skip release"
+          else
+            git tag "$DATE_TAG"
+            git push origin "$DATE_TAG"
+            gh release create "$DATE_TAG" \
+              --title "$DATE_TAG" \
+              --notes "CI自动构建静态资源包dist.zip" \
+              dist.zip
+          fi
