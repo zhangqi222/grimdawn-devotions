@@ -6,8 +6,8 @@
 # dependencies = ["pillow"]
 # ///
 """Extract devotion .tex from UI.arc, decode, downscale, and write optimized WebP
-plus a manifest the web app reads. Output dir is git-ignored. See
-docs/assets-and-textures.md for the .tex format."""
+plus a manifest the web app reads. The output dir (assets/devotions) is committed for the
+GitHub Pages build; regenerate it with `just assets`. See docs/assets-and-textures.md for the .tex format."""
 from __future__ import annotations
 import argparse, json, re, subprocess, sys, tempfile
 from pathlib import Path
@@ -51,6 +51,10 @@ def main(argv=None) -> int:
             if not (e.lower().startswith("skills/devotion/") and e.lower().endswith(".tex")):
                 continue
             if not args.include_nebula and "nebula" in e.lower():
+                continue
+            # The in-game selector buttons and zoom controls also live under skills/devotion/, but the
+            # web planner draws its own map and never references them; skip them so we do not ship dead art.
+            if re.match(r"devotionbuttons_|devotion_zoom", Path(e).stem.lower()):
                 continue
             chosen[Path(e).stem] = (arc, e)
 

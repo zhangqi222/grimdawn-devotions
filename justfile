@@ -7,10 +7,10 @@ set windows-shell := ["bash", "-uc"]
 # --- Configurable paths -----------------------------------------------------
 # Override on the CLI, e.g.  just gd_dir="D:/Games/Grim Dawn" extract
 gd_dir      := env_var_or_default("GD_DIR", "C:/Program Files (x86)/Steam/steamapps/common/Grim Dawn")
-gd_version  := env_var_or_default("GD_VERSION", "1.2.1.x")
 records_dir := justfile_directory() / "extracted/records"
 text_dir    := justfile_directory() / "extracted/text_en"
 out         := justfile_directory() / "data/devotions.json"
+out_rr      := justfile_directory() / "data/resistance-reduction.json"
 
 # Default: show available recipes
 default:
@@ -148,21 +148,63 @@ extract: _require-game-closed
     done < <(ls -d "$GD"/gdx*/ 2>/dev/null | sort -V)
     echo "Done."
 
+# Resolve the game version for parsing: read the Steam buildid from the app manifest, then map it to a
+# human-readable version via data/steam-build-versions.json. GD_VERSION overrides the map (and bootstraps
+# a brand-new build). Fails on an unknown buildid so a new release cannot silently ship the previous
+# version label. Prints one line: "<buildid> <version>".
+_game-version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    manifest="{{gd_dir}}/../../appmanifest_219990.acf"
+    buildid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" 2>/dev/null | grep -oE '[0-9]+' || true)
+    if [ -z "$buildid" ]; then echo "could not read Steam buildid from $manifest" >&2; exit 1; fi
+    if [ -n "${GD_VERSION:-}" ]; then echo "$buildid $GD_VERSION"; exit 0; fi
+    map="{{justfile_directory()}}/data/steam-build-versions.json"
+    version=$(jq -r --arg b "$buildid" '.[$b] // empty' "$map")
+    if [ -z "$version" ]; then
+      echo "Unknown Steam buildid $buildid: add it to data/steam-build-versions.json (GrimTools shows the version), or pass GD_VERSION=..." >&2
+      exit 1
+    fi
+    echo "$buildid $version"
+
 # Parse extracted records into devotions.json (passes version + steam build id). Game text tables
 # (including English) are built separately by `just i18n-tables`, the single generic builder.
 parse *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Best-effort: read the Steam build id from the app manifest for provenance.
-    manifest="{{gd_dir}}/../../appmanifest_219990.acf"
-    buildid=$(grep -oE '"buildid"[[:space:]]+"[0-9]+"' "$manifest" 2>/dev/null | grep -oE '[0-9]+' || true)
+    read -r buildid version < <(just _game-version)
     mkdir -p "$(dirname "{{out}}")"
     uv run scripts/parse_devotions.py \
         --records-dir "{{records_dir}}" --text-dir "{{text_dir}}" --out "{{out}}" \
-        --game-version "{{gd_version}}" ${buildid:+--steam-buildid "$buildid"} {{ARGS}}
+        --game-version "$version" --steam-buildid "$buildid" {{ARGS}}
+
+# Parse extracted records into resistance-reduction.json (re-run after a patch / re-extract).
+parse-rr *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r buildid version < <(just _game-version)
+    mkdir -p "$(dirname "{{out_rr}}")"
+    uv run scripts/parse_rr.py \
+        --records-dir "{{records_dir}}" --text-dir "{{text_dir}}" --out "{{out_rr}}" \
+        --devotions "{{out}}" \
+        --game-version "$version" --steam-buildid "$buildid" {{ARGS}}
+
+# Diff the regenerated data/*.json against the committed baseline: assert devotion structure is stable,
+# report tuning + RR changes. Run after regenerating, before committing. Exits non-zero on a structural break.
+diff-data:
+    uv run scripts/diff_data.py --devotions "{{out}}" --rr "{{out_rr}}"
+
+# One-command version bump: regenerate all game data, rebuild, and verify, stopping BEFORE commit so you
+# review the diff and deploy yourself. Requires the game installed + closed (Windows-only extraction).
+# `diff-data` exits non-zero on a devotion structural break, halting the chain. New buildids must be added
+# to data/steam-build-versions.json first (or pass GD_VERSION=...).
+migrate: extract parse parse-rr i18n-tables assets build diff-data check
+    @echo ""
+    @echo "Migration regenerated + verified. Review the diff-data report above (before the check output)."
+    @echo "Then: just e2e   (recommended), then   git add -A && git commit && git push   to deploy."
 
 # Full pipeline: extract then parse
-all: extract parse i18n-tables
+all: extract parse parse-rr i18n-tables
 
 # KEEPS the committed dataset (data/devotions.json, data/stat_labels.json) — those only
 # regenerate via `just parse` on Windows, so clean must never delete them.
@@ -224,7 +266,7 @@ i18n-tables *LANGS:
         fi
       fi
       uv run scripts/build_game_tables.py --devotions "{{out}}" --stat-tags data/stat-tags.json \
-        --stat-format-tags data/stat-format-tags.json \
+        --stat-format-tags data/stat-format-tags.json --rr "{{out_rr}}" \
         --text-dir "$tdir" --lang "$L" --out "data/i18n/game.$L.json"
       built="$built $L"
     done
@@ -405,6 +447,7 @@ build: cover-table
     mkdir -p dist/data
     bun scripts/bundle.ts
     cp "{{justfile_directory()}}/data/devotions.json" dist/data/devotions.json
+    cp "{{justfile_directory()}}/data/resistance-reduction.json" dist/data/resistance-reduction.json
     cp "{{justfile_directory()}}/data/cover-table.bin" dist/data/cover-table.bin
     mkdir -p dist/data/i18n && cp "{{justfile_directory()}}/data/i18n/"*.json dist/data/i18n/
     # Keep the fast resolver in sync with its Rust source: reach.wasm is a gitignored artifact that
@@ -429,7 +472,18 @@ build: cover-table
 
 # Serve web/dist locally for development (does not cd into dist, so rebuilds are not blocked)
 serve: build
+    @echo "  Planner:              http://localhost:5173/"
+    @echo "  Resistance reduction: http://localhost:5173/resistance-reduction/"
     bunx serve "{{justfile_directory()}}/web/dist" -l 5173
+
+# Open the resistance-reduction page in the default browser (run in another shell while `serve` is up)
+open-rr:
+    #!/usr/bin/env bash
+    url="http://localhost:5173/resistance-reduction/"
+    if command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command "Start-Process '$url'"
+    elif command -v open >/dev/null 2>&1; then open "$url"
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"
+    else echo "open manually: $url"; fi
 
 # Stop a running dev server (frees port 5173). Safe to run when nothing is listening.
 stop:
@@ -456,3 +510,4 @@ install-e2e:
 # own pipe and ws transports do not connect under bun on Windows. Run install-e2e once first.
 e2e: build
     cd "{{justfile_directory()}}/web" && bun e2e/smoke.ts
+    cd "{{justfile_directory()}}/web" && bun e2e/rr-smoke.ts
