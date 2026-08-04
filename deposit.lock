@@ -1,0 +1,70 @@
+{
+  "tag": "deposit-24346246.1",
+  "steam_buildid": "24346246",
+  "game_version": "1.3.0.0",
+  "schema_version": "2",
+  "published_utc": "2026-08-02T18:51:28Z",
+  "download_base": "https://github.com/tednaleid/grimdawn-devotions/releases/download/deposit-24346246.1",
+  "assets": [
+    {
+      "name": "facts.parquet",
+      "dir": "deposit",
+      "sha256": "faabb352aad88a81f423a1f9e61ca691994fcd0b3f3ada5ae49f6fd1e868d610",
+      "bytes": 16354370
+    },
+    {
+      "name": "labels.parquet",
+      "dir": "deposit",
+      "sha256": "ab57d998eceb673d615d23f2151d150812e1edf3e5529fcbb320f392243d3919",
+      "bytes": 7064533
+    },
+    {
+      "name": "meta.parquet",
+      "dir": "deposit",
+      "sha256": "a933336e64078af4eaafa72dea091706262c84f09316eabc2b29a0861766e357",
+      "bytes": 1037
+    },
+    {
+      "name": "entities.parquet",
+      "dir": "derived",
+      "sha256": "34bddfc1c5b6bc9a7f9d08cc73eb850d5bd8627516ca2e94a2dc7e9680ec1391",
+      "bytes": 146251
+    },
+    {
+      "name": "stats.parquet",
+      "dir": "derived",
+      "sha256": "ba1684c286c1bfb317d670943111a56b722459af7476ba33f63b32c1d608b9de",
+      "bytes": 502224
+    },
+    {
+      "name": "relations.parquet",
+      "dir": "derived",
+      "sha256": "5b6330f5510e384d08b27ff5e246e6ad4b18033b0e8d6dcc3ad6766d23766e7e",
+      "bytes": 54504
+    },
+    {
+      "name": "families.parquet",
+      "dir": "derived",
+      "sha256": "9c6ba0b61d441cbbc6c1678b27e1bb427a1ce50555ffc5bebbc0f4926ab1cd6a",
+      "bytes": 2621
+    },
+    {
+      "name": "sources.parquet",
+      "dir": "derived",
+      "sha256": "4cfd27d6e040d243c4ab8cf3dcab4fbbcfe39194dea8fe68239e1e8021903130",
+      "bytes": 17627
+    },
+    {
+      "name": "boosts.parquet",
+      "dir": "derived",
+      "sha256": "9035de9cd832d44ce31e700a7606aac1839e9219523a2aa655e7d149fd746b87",
+      "bytes": 62375
+    },
+    {
+      "name": "conversions.parquet",
+      "dir": "derived",
+      "sha256": "f6507d61bb75e6c56b02c6449361a591c7ce730871c3967754a66b882cf0ef8a",
+      "bytes": 11078
+    }
+  ]
+}
