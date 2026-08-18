@@ -5,11 +5,13 @@ Each item includes implementation pointers for whoever picks it up. This file
 is future work ONLY: shipped features and their history live in the code, in
 git history, and in the reference docs under `docs/`.
 
-## Grimtools import: deferred follow-ups
+## Grimtools import/export: deferred follow-ups
 
 Shipped: paste a grimtools calc link or slug to load its devotions, with `gt=`
-provenance in the hash and a link back to the source build. See
-`docs/superpowers/specs/2026-08-09-grimtools-devotion-import-design.md`.
+provenance in the hash and a link back to the source build. Also shipped: one-click
+export of a legal selection to a fresh grimtools build, associated the same way as
+`gt=`. See `docs/superpowers/specs/2026-08-09-grimtools-devotion-import-design.md`
+(import) and `docs/superpowers/specs/2026-08-16-grimtools-export-design.md` (export).
 
 - **No e2e leg for the import wiring.** The core parsing, the mapping and the panel
   adapter are unit tested, but nothing drives the three together in a browser. Belongs
@@ -29,6 +31,34 @@ provenance in the hash and a link back to the source build. See
   point may not match). Not fixed here, since it needed real UX judgment (disable the
   input while loading? cancel-and-restart? a request token?) that was out of scope for
   a review-fix pass.
+- Export: cross-session duplicate detection is impossible without a way to read a
+  build's stars back and compare; if it ever matters, the worker's `GET /` already
+  returns them, so "compare on demand when a `gt=` link is restored" is one fetch
+  (`web/src/app/main.ts` `knownBuilds`).
+- Export: the payload is a fresh level-100 character. If grimtools changes its
+  Share defaults (`bio` numbers), update `savePayload`'s fixture test from a fresh
+  capture (spec 2026-08-16, "What the investigation established").
+- Export: the rate limits (5/min per address, 60/min global) are guesses; revisit
+  from worker analytics if real users hit them.
+- Export has no data-version guard. Import refuses a stale mapping table by comparing
+  the worker's reading of `devotion.json`'s version against the table's; export sends
+  the table's `sk` ids with no such check, so a grimtools data update would silently
+  produce a build of the wrong stars. The worker already reads that version on the
+  import route, so a `?dv=` check on `/export` (refuse with a distinct error when it
+  differs from the planner's table version) is small. Until then the daily canary is
+  the only alarm.
+- The controller's export logic has no unit tests: `selectionKey`, the `knownBuilds`
+  memo and `exportStateFor`'s precedence (plus the "pinned to the selection it was made
+  from" rule) all live inside `boot()` in `web/src/app/main.ts`, which has no test
+  harness. Lifting those three into a small pure module would make them testable
+  without one. The round trip added `readBuild`, `ensureSourceRead`, the `remove`
+  computation and the base data-version refusal to that untested surface.
+- grimtools' own "Devotion path" panel reported "There's no way to include all selected
+  constellations with only 55 devotion points" for an exported 53-star build
+  (`https://www.grimtools.com/calc/2d1W1Q8V`, the forum link with Lion completed) that
+  our oracle proves has a legal 55-point schedule; stars, points and affinities matched.
+  Worth checking whether their path finder ignores refundable scaffolding, and whether
+  the game accepts our schedule for that build (docs/reachability-engine.md playbook).
 
 ## Map / List view toggle
 
@@ -122,20 +152,22 @@ Deferred:
 - Distinct map treatment for a power match vs a bonus match (today both reuse the
   benefit-match highlight on the diamond).
 
-## Reachability engine: residual synthetic false-reach
+## Reachability validation: swap-aware oracle and a filler-state arbiter
 
-`just validate-reach` Part A shows ~450 false-reaches per 12k random small
-models vs the independent BFS oracle (the resolver calls some unreachable
-selections reachable). The real-map hunt (`just realmap-hunt`) finds 0, but
-only for the Affliction-stack shape it generates. Open work: characterize the
-residual as synthetic-only, or broaden `just realmap-hunt` to other shapes.
-`reachability-oracle.test.ts` stays `test.failing` on the small-model
-mechanism; re-run `just realmap-hunt` + `just validate-reach` + `just
-validate-wasm` after any resolver change. Background: the resolver decides on
-the construction PEAK, not the post-refund cost (see
-`docs/reachability-engine.md`); the order-exact `minPeakCost` oracle lives on
-branch `reachability-costed-scaffolding`, vendored in
-`web/test/support/costed-oracle.ts`.
+Two gaps in the validation tooling, not the engine:
+
+- `minPeakCost` (`web/test/support/costed-oracle.ts`, the arbiter behind `just
+  realmap-hunt` and `just build-order-validate`) sizes each step's scaffold in
+  isolation, so its minimum is a lower bound on the true construction peak: `>
+  budget` proves unreachable, `<= budget` is only evidence that a schedule
+  exists. Making it swap-aware (carry the held scaffold set in the DP state, or
+  emit and replay its argmin order through `emitSchedule`) would turn the hunt's
+  "recovered" and the validator's "order exists" lines into proofs. Pointer:
+  docs/reachability-engine.md "The costed-scaffolding oracle".
+- There is no exact real-map arbiter for filler-needing (non-self-covering)
+  states, where the resolver's DFS decides; `validate-reach` Part B covers only
+  whole self-covering builds. Extending the oracle to enumerate filler supersets
+  (bounded, offline) would let Part B cover the resolver path too.
 
 ## Build-order popup: touch e2e via Playwright
 
@@ -194,9 +226,9 @@ Pointers: the touch block at the end of `web/e2e/smoke.ts` (the
   random scan did not surface a natural cliff-miss; a constructed synthetic model
   is the likely route.
 - Minor cleanup: extract the duplicated `esc` HTML helper into a shared
-  `web/src/adapters/html.ts`; tighten the `expect(frView.reach).toBeDefined()`
-  no-op in `reachability.test.ts` to assert the engine actually lit the
-  false-reach reachable.
+  `web/src/adapters/html.ts`; the `expect(frView.reach).toBeDefined()` in
+  `reachability.test.ts` is a no-op (that build now classifies dim, so the
+  test only shows `buildOrder` is null for a dim selection).
 
 ## Performance: monotone dim-cache for the reachability sweep
 
@@ -355,6 +387,21 @@ full design. Remaining work:
   value-templated row shape is added later, it could render the game's exact
   string (authoritative in every language) instead. Pointer: `OVERRIDES` +
   `stat.override.characterHealIncreasePercent` in `web/src/core/statFormat.ts`.
+- **Proc qualifier: source it from the game tables and carry the low-health
+  threshold.** The `trigger.<enum>` catalog values are hand-transcribed from
+  the game's `tagAutoSkillCondition01..12` strings (see docs/i18n.md), which
+  is correct today but is a copy: a `data/proc-tags.json` (trigger enum ->
+  tag) fed to `build_game_tables.py` like `stat-format-tags.json`, plus a
+  `{%d0}` -> chance interpolation at render, would make `gameText` the source
+  in all 13 languages and remove 13 x 12 catalog entries. Blocked on a game
+  table regeneration (`just i18n-tables`, Windows extraction; see "Game text
+  tables are stale" below). Do the LowHealth/LowMana threshold at the same
+  time: the game says "(100% Chance at 33% Health)" for Ghoulish Hunger and
+  "at 40% Health" for Turtle Shell, but `extract_proc` in
+  `scripts/parse_devotions.py` reads only `chanceToRun`/`triggerType` from the
+  autocast controller, so the app says "on Low Health". Read the threshold
+  field off the controller record, carry it in `proc`, and interpolate the
+  game's `{%.0f1}`.
 - **ICU-style plural handling.** Simple named-placeholder interpolation
   (`web/src/core/localization.ts`) is used today. Add narrowly only if a
   target language's grammar needs real plural rules, not preemptively.
@@ -401,18 +448,6 @@ Pointers: `reachabilityForSelection`'s maxK search in
 The coarse CI guard (`web/test/reachability-perf-guard.test.ts`) runs this TS
 path and had its MAX_MS raised to 3000ms to absorb the slowdown on CI runners
 (slowest state ~1.6s there); re-tighten it when the dedup lands.
-
-## Reachability fuzz: pre-existing conservative false-dims on seeds 97 and 113
-
-`just fuzz` seeds 97 and 113 (outside the CI fuzz range of seeds 1-20, or 1-4
-without WASM) produce 10 pre-existing conservative false-dims: the engine dims
-selections that are members of a valid build. Verified identical on
-pre-feature main, so this is not a regression from partial-constellation
-reachability. Candidates: add to the known-gaps documentation, or a deeper
-engine fix.
-
-Pointers: `web/scripts/reachability-fuzz.ts`; `docs/reachability-engine.md`
-"Known limits".
 
 ## Compare mode: repair the decoded baseline in applyHash
 
@@ -778,6 +813,14 @@ artifact policy, item source, grimtools boundary).
 but exists only in `game.en.json`, so 12 locales fall back to English for that RR
 source name. A `just i18n-tables` run fixes it.
 
+The pet-modifier fix (`fix/rr-pet-modifier-sources`) raises the stakes: re-running
+`just parse-rr` takes the catalogue from 539 to 591 sources, and 34 of the tags the
+new rows name (Raging Tempest, Hellfire Mine, Hexflame, Veilpiercer, ...) are in no
+`game.*.json` yet, so those rows would render as raw tag keys. Whoever regenerates
+`data/resistance-reduction.json` must run `just i18n-tables` in the same pass -
+that is `just migrate`, which also stamps the current Steam buildid (24756825, not
+yet in `data/steam-build-versions.json`).
+
 The same run also drops `tagEnemyTrapA03` and `tagPetThermiteMineA01` from every
 locale. That is not game-version drift: both still exist in the installed game
 (`extracted/text_en`), and `grep -rl` finds them in no input file, only inside
@@ -900,3 +943,25 @@ the block is the Chrome launch through the `CDP` class in `scripts/gt_scrape.ts`
 and the matching head of `scripts/gt_star_table.ts`. Only the debug port differs,
 so it should be a parameter. Find the block by name rather than by line number:
 the save-reader work shifted those lines.
+
+## `just check` does not run the script tests
+
+`check: fmt-check test lint lint-py typecheck` leaves out `test-scripts`, so the
+pre-commit hook runs none of the twelve `scripts/test_*.py` suites. Every oracle
+over the extracted game data is therefore advisory: a parser change that silently
+mislabels rows can be committed and pushed with a green hook. The Conduit amulet
+bug (every Conduit RR row named for the Occultist amulet) shipped through exactly
+that gap.
+
+Blocked on a pre-existing failure, not on the wiring. `just test-scripts` aborts
+early because `scripts/test_parse_monsters.py` has count drift against the
+1.3.0.7 dataset; adding `test-scripts` to `check` today would block every commit
+in the repo. Fix the monster count drift first, then append `test-scripts` to the
+`check` recipe.
+
+Note the suite is a no-op without a local game install: each test skips itself
+when `extracted/records` is absent, so this gate only bites on Windows machines
+that have run `just extract`. That is the same audience that regenerates the
+datasets, which is the audience that needs the gate.
+
+Pointers: the `check` recipe and the `test-scripts` recipe in `justfile`.

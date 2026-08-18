@@ -35,16 +35,40 @@ gap exactly. In order:
    (each bootstrapped color is one transiently held Crossroads), so
    `greedyCost + bootColors <= budget` proves reachable. This is the ladder bound:
    affinity persists, so each color is a one-time bottom-of-ladder cost.
-3. **Peak witness (sound).** For a complete self-covering selection, `minPeakSampled`
-   samples real construction orders; a sampled peak `<= budget` is a genuine order,
-   so it proves reachable. It only ever flips a would-be dim to reachable.
+3. **Peak witness (sound, schedule-backed).** For a complete self-covering selection,
+   `minPeakSampled` samples member orders and scores each by the peak of its actual
+   legal schedule (`emitSchedule`, the same loop the build-order panel renders:
+   scaffolds added before the step that needs them and refunded the moment the
+   rules allow, so a scaffold swap holds both sides until the old one may go). A
+   peak `<= budget` therefore comes with a schedule the independent oracle
+   verifies (web/test/witness-schedule.test.ts pins "lit implies a verified
+   order"), so it proves reachable and only ever flips a would-be dim to reachable.
+   A per-step model that sized each step's scaffold in isolation undercounted the
+   swap and lit a real 53-point build at 53 whose cheapest schedule needs 54. It
+   tries three deterministic orders first - the bootstrap heuristic (lowest requirement
+   first, then densest grant) and two peel orders (`peelOrder`: members chosen back
+   to front so each is placed last among what remains only when the others' grants
+   already cover every remaining requirement; one variant puts zero-requirement
+   members in front, the other peels them like any member) - then
+   `PEAK_WITNESS_TRIES` seeded shuffles. The peel orders exist for members whose
+   requirement is met only with their own grant: they need a scaffold whenever they
+   are placed, so the heuristic's habit of placing the highest-requirement member
+   last overshoots a cap-tight build. The two variants split on whether the
+   crossroads members' colors are needed: in front they shrink every later deficit,
+   but when nobody needs them they only inflate the size held at the scaffold step.
 4. **Exact resolver.** The remaining gap goes to `reachableExactFrom` (or its WASM
    port): a memoized branch-and-bound DFS over filler subsets, cover-table pruned.
    At every covering node the build is self-covering, so any further filler is
    refundable and the peak witness already models it as a transient scaffold; the
    verdict there is final, so the resolver decides (gate or witness) and returns,
-   pruning the post-covering filler-superset subtree. Reachable iff some covering
-   build has a construction order within budget.
+   pruning the post-covering filler-superset subtree. The witness here is the
+   deterministic candidates only (no shuffles): a resolver call witnesses many
+   covering nodes, and shuffling at each one was measured at 2.5x the mean and 4.6x
+   the p99 per-click latency for 32 tries (1.4x / 1.8x for 8), while the second
+   peel variant recovered most of what the shuffles would have for the cost of one
+   more schedule. It also keeps the Rust port RNG-free and verdict-equivalent
+   (`schedule_peak` in web/wasm/src/lib.rs mirrors `emitSchedule`'s peak).
+   Reachable iff some covering build has a construction schedule within budget.
 
 The cheap bracket decides almost every candidate; only the gap reaches the resolver.
 
@@ -64,47 +88,90 @@ The cheap bracket decides almost every candidate; only the gap reaches the resol
   complete). A star is reachable iff its path keeps the count at or under `maxK`. This is what
   lights a 4-point path to a celestial power inside a constellation too expensive to finish.
 
+### Explaining a dim verdict
+
+A dim verdict is a number the UI can explain. `dimReport` (web/src/core/dimReasons.ts) is
+computed on hover only, cached per refresh, for the target asked about (the selection plus a
+whole constellation, or plus a locked star's path). It carries three things, and the star and
+constellation tooltips, the points bar's floor segment, and the build-order panel's empty state
+render them through one adapter (`web/src/adapters/dimText.ts`):
+
+- `needs`: `minCostFrom`, the fewest points at which the target classifies reachable, searched
+  past the cap (`DIM_SEARCH_MAX`, cap plus ten) so the line can say "Needs 56 of your 55 points"
+  rather than only "cannot"; null when nothing within the bound builds it.
+- `deficit`: the colors the target's completed members do not supply for its own requirements,
+  each with the constellations whose requirement sets that need ("2 more Order for Scales of
+  Ulcama"). This is the affinity panel's have/need with its `needSource`, made per-target.
+- `scaffolders`: the members whose requirement in some color exceeds what the rest of the target
+  supplies. Each can only be activated with transient affinity from outside the build, which is
+  why a build sitting exactly at the cap can be unfinishable: the last piece placed must activate
+  with no room for a scaffold. It is a sufficient explanation, not a necessary one: a pure lock
+  (two members each covering the other's requirement) needs a scaffold with an empty list, and
+  the tooltip then shows only the points line.
+
+The floor segment of the points bar (`curMin - used`) is the same idea for the current selection:
+its title names the deficit and the scaffold needers of the selection itself, without a resolver
+call.
+
 ## Soundness
 
 These one-sided facts are exact, and the engine never contradicts them:
 
 - `lowerBoundFrom > budget` implies genuinely dim.
-- `greedyCost + bootColors <= budget` implies genuinely reachable.
-- a witnessed construction peak `<= budget` implies genuinely reachable.
+- `greedyCost + bootColors <= budget` implies genuinely reachable. Greedy's
+  transient seed is honest: a crossroads counts once, either as the transient +1
+  it lends while a member activates or as a placed member or filler, never both
+  (`crossroadsColor`/`seedFor`; the seed offers a color only while one of its
+  crossroads is unplaced). The resolver's `constructible` gate uses the same seed.
+- a witnessed construction peak `<= budget` implies genuinely reachable: the peak is
+  that of a legal schedule the independent oracle accepts.
 
-The exact resolver decides the gap on the construction peak. The seed-only
-`constructible` fixpoint and greedy's bare refunded cost both ignore the peak and so
-once produced false-reaches (lighting a build whose construction peak overflows the
-budget, e.g. a 3-star tier-1 constellation at a 3-point budget, whose peak is 4); the
-gate and witness above charge the peak instead.
+Every reachable proof charges the construction peak. Neither `constructible` (a
+seed fixpoint that says an order exists) nor greedy's bare refunded cost is enough
+on its own: each ignores what is held transiently, so each would light a build
+whose peak overflows the budget (a 3-star tier-1 constellation at a 3-point budget
+has a peak of 4: the crossroads is held while its stars go in).
 
 ## Known limits
 
-- **Residual false-reach on random synthetic models.** Against an exhaustive BFS
-  oracle on small random models (`just validate-reach` Part A), the engine still
-  false-reaches on roughly 450 of 12,000 sampled states. These shapes are not
-  observed on the real 109-constellation map: `just realmap-hunt` finds 0
-  construction-peak false-reaches, and both formerly-confirmed real-map cases now
-  classify dim. The real map's affinity abundance (per-color supply 4-9x the caps)
-  makes the peak rarely bind. This is an upper bound from a targeted hunt, not a
-  formal proof that no real-map false-reach shape exists.
+- **No known false-reach.** Against an exhaustive BFS oracle on small random models
+  (`just validate-reach` Part A, 12,000 sampled states on models with only two or
+  three sources per color) the engine false-reaches on 0. On the real map
+  `just realmap-hunt` finds 0 construction-peak false-reaches and the two
+  formerly-confirmed real-map cases classify dim. Both are evidence from sampling,
+  not a formal proof; what is proven is per verdict, since every reachable proof
+  is a schedule (witness) or a schedule-shaped bound (greedy's ladder, the peak
+  gate) with an honest seed. The two mechanisms closed most recently were the
+  crossroads seed counted twice and the witness sizing each step's scaffold in
+  isolation (missing the swap cost); each is pinned by a test.
+- **Conservative false-dims on the synthetic models.** The same Part A dims 48 of
+  12,000 states the oracle proves reachable: partial selections reachable only by
+  transiently over-completing a kept-partial constellation to bootstrap a lock and
+  refunding it (a star-level move the whole-build resolver does not model), and
+  covering builds whose only in-budget schedule all three deterministic witness
+  candidates miss (the resolver has no shuffles). Part B finds none of either on
+  real-map whole-constellation builds.
 - **The peak witness is a sampler**, so its dim is conservative: a build whose only
-  valid order the sampler misses can be false-dimmed. Real-model false-dims are ~2
-  per 6,600 self-covering builds (`validate-reach` Part B), the safe direction
-  (hiding an achievable build, never lighting an unbuildable one). Raising
-  `PEAK_WITNESS_TRIES` trades speed for fewer of these.
+  valid schedule the sampler misses can be false-dimmed. `validate-reach` Part B
+  finds 0 real-model false-dims in 6,618 self-covering builds, and the direction is
+  the safe one (hiding an achievable build, never lighting an unbuildable one). On
+  5,000 generated near-cap (52-55 point) builds at cap 55 the engine dims 7, none of
+  which a 2,000-try search or the constructor can prove reachable. Raising
+  `PEAK_WITNESS_TRIES` trades speed for fewer misses on the classify path; the
+  resolver's covering-node witness has only the deterministic orders.
 
 ## The costed-scaffolding oracle
 
 An order-exact minimum-construction-peak DP (`minPeakCost`) lives on branch
 `reachability-costed-scaffolding` and is vendored into
 `web/test/support/costed-oracle.ts`. It is far too slow for the interactive path
-(it searches ~100 real scaffolds per query), but it is sound by construction, so it
-serves as the validation oracle: the arbiter in `just realmap-hunt` and the ground
-truth in the costed-oracle tests. The shipped engine returns only a verdict; the
-guided build order (`buildOrderPath`) builds its construction schedule from its
-own order generators (the need-driven greedy and the sampled witness, next
-section), not from this DP.
+(it searches ~100 real scaffolds per query). It sizes each step's scaffold in
+isolation, without the swap cost a real schedule pays, so its minimum is a lower
+bound on the true minimum peak: `minPeakCost > budget` proves unreachable (the
+arbiter `just realmap-hunt` relies on, sound), while `minPeakCost <= budget` is
+only evidence that an order exists (what `just build-order-validate` and the
+"recovered" line of the hunt report). The shipped engine's witness is stricter
+than this oracle: it lights nothing without a schedule.
 
 ## The guided build order: legal at every step, verified or absent
 
@@ -114,13 +181,16 @@ emitted and the better schedule wins by the ordering objective (fewer scaffold
 churn points, then fewer steps): the need-driven greedy order
 (`needDrivenOrder`, each member activated by what the build has already placed
 plus at most a refundable crossroads, so the build builds itself), and the
-sampled peak-minimizing order (`sampledConstruction`), which also remains the
-engine's untouched reachability witness (`minPeakSampled`). Neither generator
-dominates - the greedy wins cap-tight builds the sampler scaffolds heavily,
-the sampler's bootstrap heuristic wins typical builds - so the per-build best
-of both is never worse than either alone. Both orders feed the same emission
-loop, which adds transient scaffold constellations before the steps that need
-them and refunds each the moment the in-game rules allow. Its contract:
+sampled peak-minimizing order (`sampledConstruction`), which is also the
+engine's reachability witness (`minPeakSampled`) and arrives with its own legal
+schedule. Neither generator dominates - the greedy wins cap-tight builds the
+sampler scaffolds heavily, the sampler's deterministic orders win typical builds
+- so the per-build best of both is never worse than either alone. Both orders
+feed the same emission loop (`emitSchedule`), which adds transient scaffold
+constellations before the steps that need them and refunds each the moment the
+in-game rules allow; the panel re-emits the sampled order at a deeper
+scaffold-search cap for smaller scaffolds and falls back to the witness's own
+schedule, so a lit build always has an order. Its contract:
 
 - **Canonical input.** The member array is sorted by constellation id at entry,
   so the output is a pure function of the build set. Panel, tests, and scripts
@@ -180,6 +250,53 @@ the aggregate churn/step quality pins in web/test/build-order-oracle.test.ts
 (a silent ordering regression fails CI; `just order-quality` is the
 per-build measurement tool), and the offline harness `just build-order-validate`,
 whose illegal-path count must stay zero.
+
+## Investigating a reported build
+
+A user report usually arrives as a share link ("it shows 54 used but will not let me
+spend the last point", "X lit up only after I added a crossroads"). Everything the
+UI decides is reproducible headlessly from that hash:
+
+1. **Decode and summarize.** `decodeHash(hash, canonicalStarIds(model))` gives the
+   selection and cap; `selectionSummary(model, selected)` gives the per-color
+   supply and target, the complete members (`built`) and any partials
+   (`partialFinish`). `selectionView(model, cons, table, selected, cap)` is the
+   exact per-click result: `reach.completable`, `reach.reachableStars`, `minCost`,
+   and the verified build order (or null). `dimReport(model, cons, table, target)` on
+   the selection plus the constellation in question is what the tooltip shows for it:
+   the points it needs past the cap, the affinity short and who needs it, and the
+   members that need transient affinity. Often that alone answers the report.
+2. **Replay the ladder** on the suspect candidate (selection plus the constellation
+   or star in question): `lowerBoundFrom`, `greedyFrom` + `lastGreedyBootColors`,
+   `minPeakSampled` (partial-free builds only), then `reachableExactFrom` (the TS
+   twin of the WASM resolver). Whichever rung dims it is the one to explain.
+3. **Prove the truth independently** before calling anything a bug. Sound
+   "reachable" witnesses: `buildOrderEscalated` (or `buildOrderPath` at high tries)
+   replayed through `replayBuildOrder`/`verifyBuildOrder` in
+   `web/src/core/orderLegality.ts` (returns null when legal), `constructReachable`
+   in `web/test/support/walk-fuzzer.ts`, or `minPeakSampled` with thousands of
+   tries. If one of them succeeds where the engine dims, it is a false-dim; if the
+   engine lights something none of them can build, that is the serious direction
+   (a false-reach) and `just realmap-hunt` is the tool. A build lit only after an
+   additive change (adding a crossroads made a constellation viable) is a
+   monotonicity violation and always a false-dim in the earlier state.
+4. **Pin it as a test.** Real-user builds go into `namedCases` in
+   `web/scripts/gen-reach-fixtures.ts` and, hand-inserted in the same shape, into
+   `web/test/fixtures/reachable-builds.json` (regenerating re-mines the seeded
+   cases against the current engine, so do not regenerate just to add a name);
+   `web/test/reachability-walk.test.ts` asserts every named case classifies
+   reachable. A focused file per real report (for example
+   `web/test/reach-last-point.test.ts`) can pin the exact symptoms: the sweep,
+   the validity floor, the live build order, the resolver path.
+5. **Mirror deterministic witness changes in Rust.** Anything that changes the
+   deterministic (tries = 0) verdict of `minPeakSampled` (its candidate orders and
+   `emitSchedule`, whose peak scores them), `peakGateReachable`, or the DFS in
+   `reachableExactFrom` must be ported to `web/wasm/src/lib.rs`, then
+   `just wasm` and `just validate-wasm`. `data/reach.wasm` is a gitignored artifact
+   (CI builds it before deploying), so the Rust source is what ships.
+6. **Measure before and after** with `just perf` and, for the reported state, a
+   direct timing of `selectionView` on it, so the fix's cost is a number and not
+   a guess.
 
 ## Verifying after a resolver change
 

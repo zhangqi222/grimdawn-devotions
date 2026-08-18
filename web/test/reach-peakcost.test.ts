@@ -1,8 +1,16 @@
 // ABOUTME: Unit tests pinning the peak-aware construction-cost helpers (peakToReach, minPeakSampled) on
 // ABOUTME: small hand-computed models where "peak points held" differs from "subset size" (the scaffold crux).
 import { test, expect } from "bun:test";
-import { buildCoverTable, peakToReach, minPeakSampled, INF, type ReachCon, type Vec } from "../src/core/reachability";
-import { reachableSet, randModel, mulberry32 } from "./support/reach-oracle";
+import {
+  buildCoverTable,
+  classifyForSelection,
+  peakToReach,
+  minPeakSampled,
+  INF,
+  type ReachCon,
+  type Vec,
+} from "../src/core/reachability";
+import { reachableSet, extendableReachable, randModel, mulberry32, stateFromCounts } from "./support/reach-oracle";
 
 const z = (): Vec => [0, 0, 0, 0, 0];
 const v = (asc = 0, cha = 0, eld = 0, ord = 0, pri = 0): Vec => [asc, cha, eld, ord, pri];
@@ -30,7 +38,7 @@ test("peakToReach: a deficit reachable by crossroads alone equals the crossroads
 test("peakToReach: eldritch 3 via Quill peaks at 5, not Quill's 4 stars", () => {
   // Quill needs eld 1 to start and grants asc 3 + eld 3. Reaching eld 3 means holding the eldritch
   // crossroads (1) while placing Quill (4) = peak 5; Quill then self-sustains so the crossroads refunds,
-  // but the peak already hit 5. This is the case the SEED model gets wrong.
+  // but the peak already hit 5. A flat one-point-per-color seed model would miss the held crossroads.
   const quill = con("quill", 4, v(0, 0, 1), v(3, 0, 3));
   const { cons, table } = withTable([cx(2), quill, anchor(v(3, 0, 3))]);
   expect(peakToReach(cons, table, v(0, 0, 3))).toBe(5);
@@ -59,6 +67,54 @@ test("peakToReach: an uncoverable deficit is INF", () => {
 test("peakToReach: a zero deficit costs nothing", () => {
   const { cons, table } = withTable([cx(0), anchor(v(1))]);
   expect(peakToReach(cons, table, z())).toBe(0);
+});
+
+test("minPeakSampled: a member that only meets its requirement with its own grant is not placed last", () => {
+  // Build: the ascendant crossroads (+1), a tier-1 granter (needs asc 1, +5), a "self-dependent" member
+  // that needs asc 8 but the others supply only 6 (so it needs a 2-asc scaffold whenever it is placed),
+  // and a zero-grant-in-asc member needing asc 6. The bootstrap heuristic (lowest requirement first)
+  // places the asc-8 member LAST, at the build's full 15 points plus the 3-star scaffold = peak 18.
+  // Placing it third (11 + 3 = 14) and the asc-6 member last (covered by 1 + 5 + 3 = 9) peaks at the
+  // build size, 15. The deterministic candidates alone (tries = 0) must find that order.
+  const tier1 = con("tier1", 4, v(1), v(5));
+  const selfDep = con("self_dep", 6, v(8), v(3));
+  const late = con("late", 4, v(6), v(0, 1));
+  const scaffold = con("scaffold", 3, z(), v(2));
+  const { cons, table } = withTable([cx(0), tier1, selfDep, late, scaffold]);
+  const B = [cx(0), tier1, selfDep, late];
+  expect(minPeakSampled(cons, table, B, 15, 0)).toBe(15);
+});
+
+test("minPeakSampled: crossroads members whose colors nobody needs are not placed before the scaffold step", () => {
+  // Build: a +2 chaos / +3 asc granter (2 stars), a +2 eld granter (1), a member needing chaos 3 and eld 4
+  // (1 star, +2 eld), and two crossroads members of colors no requirement uses. Budget 10, build size 6.
+  // The needy member's activation needs eld 2 more than the build supplies before it, so a 5-point
+  // scaffold (the eld crossroads plus a 4-star +1 eld tier-1) is held at its step. Placing the two idle
+  // crossroads first (zero requirement first) puts that step at size 6: peak 11. Peeling them to the end
+  // puts it at size 4: peak 9. The deterministic candidates alone (tries = 0) must find 9.
+  const granter = con("granter", 2, z(), v(2, 3));
+  const eld2 = con("eld2", 1, z(), v(0, 0, 2));
+  const needy = con("needy", 1, v(0, 3, 4), v(0, 0, 2));
+  const tier1 = con("tier1", 4, v(1), v(0, 0, 1));
+  const idleA = cx(3, "idle_a");
+  const idleB = cx(4, "idle_b");
+  const { cons, table } = withTable([granter, eld2, needy, tier1, idleA, idleB, cx(0), cx(1), cx(2)]);
+  const B = [needy, idleA, idleB, granter, eld2];
+  expect(minPeakSampled(cons, table, B, 10, 0)).toBe(9);
+});
+
+test("classifyForSelection: the crossroads seed is never counted twice", () => {
+  // A one-star member that needs chaos 4 to activate, in a model whose OTHER chaos sources total 3
+  // (a two-star +2 granter and the chaos crossroads). Its own +1 counts for sustain, not activation, so
+  // it can never be started at any budget. Modeling a free transient +1 seed AND placing the same
+  // crossroads as filler would count that crossroads twice and wrongly light it.
+  const granter = con("granter", 2, z(), v(0, 2));
+  const needy = con("needy", 1, v(0, 4), v(0, 1));
+  const cons = [granter, needy, cx(0), cx(1), cx(2), cx(3), cx(4)];
+  const table = buildCoverTable(cons);
+  const counts = cons.map((c) => (c.id === "needy" ? 1 : 0));
+  expect(extendableReachable(counts, reachableSet(cons, 12)!)).toBe(false); // the BFS oracle agrees
+  expect(classifyForSelection(cons, table, stateFromCounts(counts, cons), 12)).toBe("dim");
 });
 
 // --- minPeakSampled is a SOUND witness vs the BFS oracle ---------------------------------------------

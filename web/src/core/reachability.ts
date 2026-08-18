@@ -13,16 +13,40 @@ const CAP_MAX: Vec = [20, 8, 20, 10, 20];
 const NOCOST = 65535;
 export const INF = 1e9;
 export const BUDGET = 55;
-// Crossroads supply 1 affinity of each color and are refundable, so any build can be seeded
-// with one point per color for free while bootstrapping.
-const SEED: Vec = [1, 1, 1, 1, 1];
+/**
+ * The color of a crossroads-like constellation (one star, no requirement, a single +1 of one color), or -1.
+ * A crossroads is refundable, so a build may hold one transiently while a member activates: the engine's
+ * "seed". A seed is honest only for a crossroads the build is not already counting - one placed as a
+ * member or as filler already contributes its +1 - so every seed below is computed against what is
+ * placed, never assumed. Structural, so a synthetic model's crossroads are recognized too.
+ */
+export function crossroadsColor(c: ReachCon): number {
+  if (c.size !== 1 || c.req[0] || c.req[1] || c.req[2] || c.req[3] || c.req[4]) return -1;
+  let color = -1;
+  for (let k = 0; k < 5; k++) {
+    if (c.grant[k] === 0) continue;
+    if (c.grant[k] !== 1 || color >= 0) return -1;
+    color = k;
+  }
+  return color;
+}
+
+/** The transient seed a build may draw on: +1 per color with a crossroads-like constellation not in `counted`. */
+function seedFor(cons: ReachCon[], counted: (c: ReachCon) => boolean): Vec {
+  const seed = zero();
+  for (const c of cons) {
+    const k = crossroadsColor(c);
+    if (k >= 0 && !counted(c)) seed[k] = 1;
+  }
+  return seed;
+}
 // Peak-witness search bounds (see classifyForSelection): it samples this many construction orders, each
 // with a per-scaffold node cap, so it stays cheap even across a full sweep. The witness is self-bounding -
 // it returns instantly for a non-self-covering build (no order can help) and only samples for a complete
 // self-covering one - so it needs no budget-proximity gate; a sampler that finds no order keeps the dim.
-const PEAK_WITNESS_TRIES = 8;
+const PEAK_WITNESS_TRIES = 32;
 const PEAK_NODE_CAP = 3000;
-// The resolver-gate witness uses the deterministic heuristic order only (no random shuffles): it keeps the
+// The resolver-gate witness uses the deterministic candidate orders only (no random shuffles): it keeps the
 // gate cheap and, crucially, RNG-free so the Rust/WASM port stays bit-for-bit verdict-equivalent. Builds
 // that need a shuffled order to fit budget stay conservatively dim (sound).
 const GATE_WITNESS_TRIES = 0;
@@ -279,8 +303,8 @@ function fillerFor(cons: ReachCon[], st: ReachState): ReachCon[] {
 
 /**
  * Refund-aware greedy: construct a valid build placing every claimed constellation, seeded by
- * the free crossroads, repeatedly adding the unlocked constellation that best closes the affinity
- * deficit per star. Once the claimed are placed and the build's own affinity covers every placed
+ * the crossroads it has not placed (seedFor), repeatedly adding the unlocked constellation that best
+ * closes the affinity deficit per star. Once the claimed are placed and the build's own affinity covers every placed
  * member's requirement, the crossroads are refunded and the cost excludes them.
  *
  * Returns the post-refund STEADY-STATE cost, which is a lower bound on the construction PEAK (you end
@@ -319,19 +343,32 @@ export function greedyFrom(cons: ReachCon[], st: ReachState, budget = BUDGET): n
   const built = st.built;
   const pool = [...built, ...fillerFor(cons, st)];
   const placed = new Array(pool.length).fill(false);
+  // Every crossroads-like constellation is in the pool (started ones in built, the rest as filler); the
+  // seed offers a color only while one of its crossroads is unplaced, so a crossroads is never counted
+  // twice (once as the transient seed, again as a placed member or filler).
+  const seedLeft = zero();
+  for (const c of pool) {
+    const k = crossroadsColor(c);
+    if (k >= 0) seedLeft[k]!++;
+  }
+  const seed = (): Vec => seedLeft.map((n) => (n > 0 ? 1 : 0)) as Vec;
+  const place = (i: number): void => {
+    placed[i] = true;
+    const k = crossroadsColor(pool[i]!);
+    if (k >= 0) seedLeft[k]!--;
+  };
   let build = zero(); // affinity from placed constellations (excludes the transient seed)
   let maxReqPlaced = zero(); // every placed constellation must stand under this once seed is gone
   let cost = 0,
     builtLeft = built.length;
   let bootMask = 0; // colors any placement needed the seed crossroads for (req[c] > build[c] at placement)
   for (;;) {
-    const gain = addCap(SEED, build);
     let did = false;
     // Auto-place the committed members as they unlock; filler is added selectively below.
     for (let i = 0; i < built.length; i++) {
-      if (placed[i] || !covers(gain, built[i]!.req)) continue;
+      if (placed[i] || !covers(addCap(seed(), build), built[i]!.req)) continue;
       for (let c = 0; c < 5; c++) if (built[i]!.req[c]! > build[c]!) bootMask |= 1 << c;
-      placed[i] = true;
+      place(i);
       cost += built[i]!.size;
       build = addCap(build, built[i]!.grant);
       maxReqPlaced = maxV(maxReqPlaced, built[i]!.req);
@@ -343,7 +380,7 @@ export function greedyFrom(cons: ReachCon[], st: ReachState, budget = BUDGET): n
       return cost <= budget ? cost : INF;
     }
     if (did) continue;
-    const g2 = addCap(SEED, build);
+    const g2 = addCap(seed(), build);
     const target = covers(build, maxReqPlaced) ? st.target : maxReqPlaced; // close self-sustain first, then started reqs
     const deficit: Vec = [
       Math.max(0, target[0]! - build[0]),
@@ -366,7 +403,7 @@ export function greedyFrom(cons: ReachCon[], st: ReachState, budget = BUDGET): n
     }
     if (best < 0 || bestScore === 0) return INF;
     for (let c = 0; c < 5; c++) if (pool[best]!.req[c]! > build[c]!) bootMask |= 1 << c;
-    placed[best] = true;
+    place(best);
     cost += pool[best]!.size;
     build = addCap(build, pool[best]!.grant);
     maxReqPlaced = maxV(maxReqPlaced, pool[best]!.req);
@@ -387,7 +424,7 @@ export function classify(cons: ReachCon[], table: CoverTable, claimedIds: string
   // Sound reachable proof that charges the transient crossroads peak (greedyMinCost's refunded cost did
   // not, so it false-reached tight builds). The tight band it cannot decide stays "unknown" for the
   // exact resolver, which models the peak.
-  if (peakGateReachable(claimed, budget)) return "reachable";
+  if (peakGateReachable(cons, claimed, budget)) return "reachable";
   return "unknown";
 }
 
@@ -414,9 +451,10 @@ function coverCostAt(table: CoverTable, deficit: Vec): number {
   return v === NOCOST ? INF : v;
 }
 
-/** Can every member of B be completed in some order, seeded by the free crossroads? */
-function constructible(B: ReachCon[]): boolean {
-  let gain: Vec = [...SEED];
+/** Can every member of B be completed in some order, seeded by the crossroads B does not already contain? */
+function constructible(cons: ReachCon[], B: ReachCon[]): boolean {
+  const inB = new Set(B.map((m) => m.id));
+  let gain = seedFor(cons, (c) => inB.has(c.id));
   const done = B.map(() => false);
   let placed = 0,
     changed = true;
@@ -438,7 +476,7 @@ function constructible(B: ReachCon[]): boolean {
  * transient construction peak that `constructible`/greedy ignore. Affinity persists, so each distinct
  * required color needs at most one refundable crossroads held at once; a no-refund schedule that places
  * one crossroads per required color and then the whole self-covering build peaks at
- * `size + distinctRequiredColors`. So if B is self-covering AND unit-seed-constructible (an order
+ * `size + distinctRequiredColors`. So if B is self-covering AND seed-constructible (an order
  * exists) AND `size + distinctRequiredColors <= budget`, a genuine construction order fits the budget.
  *
  * Sound: it never accepts an unbuildable build (measured 0 wrong-accepts across ~18k near-ceiling
@@ -446,7 +484,7 @@ function constructible(B: ReachCon[]): boolean {
  * bootstrap sequentially so not every crossroads is held at once - returns false and must fall through
  * to the peak witness. Crucially RNG-free, so the WASM resolver port stays verdict-equivalent.
  */
-function peakGateReachable(B: ReachCon[], budget: number): boolean {
+function peakGateReachable(cons: ReachCon[], B: ReachCon[], budget: number): boolean {
   let size = 0;
   let grant = zero(),
     req = zero();
@@ -459,7 +497,7 @@ function peakGateReachable(B: ReachCon[], budget: number): boolean {
   let colors = 0;
   for (let i = 0; i < 5; i++) if (req[i]! > 0) colors++;
   if (size + colors > budget) return false; // peak may exceed budget; defer to the witness
-  return constructible(B); // a unit-seed order must exist, else the peak bound is not valid
+  return constructible(cons, B); // a seeded order must exist, else the peak bound is not valid
 }
 
 /**
@@ -568,45 +606,68 @@ function buildParts(cons: ReachCon[], B: ReachCon[]): { G: ReachCon[]; totalSize
 }
 
 /**
- * Construction peak for placing the granting members in `order`: each step holds a transient scaffold
- * sized (via peakToReach) to keep every placed member valid until the build's own grants cover it. The
- * peak is the largest (placed size + held scaffold) over the steps, maxed with the whole build size (the
- * deferred zero-grant members fill up to it). A real schedule, so its peak upper-bounds the true min peak.
+ * The sampler's peel candidates, built back to front: each pick is the member whose requirement, with
+ * every requirement not yet peeled, is covered by the OTHER unpeeled members' grants (plus the front), so
+ * it needs no scaffold when it is placed last among them. Ties prefer the largest member (it defers size
+ * to where no scaffold is held), then input order; when no member qualifies, the one with the smallest
+ * summed deficit is peeled. This is the bootstrap heuristic's blind spot: it places the highest-requirement
+ * member last, and a member whose requirement is only met with its own grant needs a scaffold whenever it
+ * is placed, so placing it at the build's full size overshoots the peak.
+ *
+ * Two variants, one flag: with `zeroReqFirst` the zero-requirement members (crossroads) go in front,
+ * which wins when their grants feed colors the build needs (every later deficit shrinks); without it
+ * they are peeled like any other member, which wins when their colors are not needed at all, so placing
+ * them first only inflates the size held at the step that still needs a scaffold. Each is one schedule,
+ * RNG-free, mirrored in the Rust resolver (peel_order).
  */
-function orderPeak(
-  order: ReachCon[],
-  pool: ReachCon[],
-  table: CoverTable,
-  totalSize: number,
-  peakNodeCap: number,
-): number {
-  let grant = zero();
-  let mreq = zero();
-  let size = 0;
-  let peak = totalSize;
-  for (const m of order) {
-    mreq = maxV(mreq, m.req);
-    size += m.size;
-    const def: Vec = [
-      Math.max(0, mreq[0] - grant[0]),
-      Math.max(0, mreq[1] - grant[1]),
-      Math.max(0, mreq[2] - grant[2]),
-      Math.max(0, mreq[3] - grant[3]),
-      Math.max(0, mreq[4] - grant[4]),
-    ];
-    const sc = peakToReach(pool, table, def, grant, peakNodeCap);
-    if (sc >= INF) return INF;
-    if (size + sc > peak) peak = size + sc;
-    grant = addCap(grant, m.grant);
+function peelOrder(G: ReachCon[], zeroReqFirst: boolean): ReachCon[] {
+  const reqFree = (c: ReachCon) =>
+    zeroReqFirst && c.req[0] === 0 && c.req[1] === 0 && c.req[2] === 0 && c.req[3] === 0 && c.req[4] === 0;
+  const front = G.filter(reqFree);
+  const rest = G.filter((c) => !reqFree(c));
+  let base = zero();
+  for (const m of front) base = addCap(base, m.grant);
+  const peeled: ReachCon[] = [];
+  while (rest.length) {
+    let mreq = zero();
+    for (const m of rest) mreq = maxV(mreq, m.req);
+    let pick = -1;
+    let pickDef = Infinity;
+    let pickSize = -1;
+    for (let i = 0; i < rest.length; i++) {
+      let others = base;
+      for (let j = 0; j < rest.length; j++) if (j !== i) others = addCap(others, rest[j]!.grant);
+      let def = 0;
+      for (let k = 0; k < 5; k++) def += Math.max(0, mreq[k]! - others[k]!);
+      const size = rest[i]!.size;
+      if (def < pickDef || (def === pickDef && size > pickSize)) {
+        pick = i;
+        pickDef = def;
+        pickSize = size;
+      }
+    }
+    peeled.unshift(rest[pick]!);
+    rest.splice(pick, 1);
   }
-  return peak;
+  return [...front, ...peeled];
 }
 
-// Core sampler shared by minPeakSampled (which wants the peak) and minPeakSampledOrder (which wants the
-// witness order). Tries the bootstrap-order heuristic (lowest requirement first, then highest grant
-// density) plus up to `tries` seeded shuffles of the granting members, keeping the smallest-peak order and
-// early-exiting the moment one lands at or under budget. `order` is the granting members in their best-peak
-// order; `tail` is the zero-grant members (placed last - they never raise the peak above the build size).
+/** The sampler's result: the smallest schedule peak found, the member order behind it, and that
+ *  order's legal schedule when the peak fits the budget (the witness IS a schedule). */
+interface SampledConstruction {
+  peak: number;
+  order: ReachCon[]; // the granting members in their best-peak order
+  tail: ReachCon[]; // the zero-grant members, placed last (they never raise the peak above the build size)
+  steps: BuildStep[] | null;
+}
+
+// Core sampler shared by minPeakSampled (which wants the peak), minPeakSampledOrder (which wants the
+// witness order) and buildOrderPath (which wants the schedule). Every candidate order is scored by the
+// peak of its actual legal schedule (emitSchedule: scaffolds added before the step that needs them,
+// refunded the moment the rules allow, so a scaffold swap holds both sides until the old one may go).
+// Tries three deterministic orders - the bootstrap heuristic (lowest requirement first, then highest
+// grant density) and both peel variants (peelOrder) - plus up to `tries` seeded shuffles of the granting
+// members, keeping the smallest-peak order and early-exiting the moment one lands at or under budget.
 function sampledConstruction(
   cons: ReachCon[],
   table: CoverTable,
@@ -614,20 +675,33 @@ function sampledConstruction(
   budget: number,
   tries: number,
   peakNodeCap: number,
-): { peak: number; order: ReachCon[]; tail: ReachCon[] } {
+): SampledConstruction {
   const grants = (c: ReachCon) => c.grant[0] || c.grant[1] || c.grant[2] || c.grant[3] || c.grant[4];
   const tail = B.filter((c) => !grants(c));
   const parts = buildParts(cons, B);
-  if (!parts) return { peak: INF, order: [], tail };
+  if (!parts) return { peak: INF, order: [], tail, steps: null };
   const { G, totalSize, pool } = parts;
-  if (totalSize > budget) return { peak: INF, order: [], tail };
-  if (G.length === 0) return { peak: totalSize, order: [], tail };
+  if (totalSize > budget) return { peak: INF, order: [], tail, steps: null };
   const reqsum = (c: ReachCon) => c.req[0] + c.req[1] + c.req[2] + c.req[3] + c.req[4];
   const ratio = (c: ReachCon) => (c.grant[0] + c.grant[1] + c.grant[2] + c.grant[3] + c.grant[4]) / c.size;
   const order = [...G].sort((a, b) => reqsum(a) - reqsum(b) || ratio(b) - ratio(a));
-  let best = orderPeak(order, pool, table, totalSize, peakNodeCap);
-  let bestOrder = [...order];
-  if (best <= budget) return { peak: best, order: bestOrder, tail };
+  let best = INF;
+  let bestOrder: ReachCon[] = [];
+  let bestSteps: BuildStep[] | null = null;
+  // Score a candidate; true when it fits the budget (the caller stops sampling).
+  const consider = (candidate: ReachCon[]): boolean => {
+    const sched = emitSchedule(candidate, tail, pool, table, budget, peakNodeCap);
+    const peak = sched ? sched.peak : INF;
+    if (peak < best) {
+      best = peak;
+      bestOrder = [...candidate];
+      bestSteps = sched?.steps ?? null;
+    }
+    return best <= budget;
+  };
+  const done = (): SampledConstruction => ({ peak: best, order: bestOrder, tail, steps: bestSteps });
+  if (consider(order)) return done();
+  for (const zeroReqFirst of [true, false]) if (consider(peelOrder(G, zeroReqFirst))) return done();
   let seed = (totalSize * 2654435761 + G.length * 40503) >>> 0; // deterministic per build
   const rnd = () => {
     seed = (seed + 0x6d2b79f5) >>> 0;
@@ -642,21 +716,19 @@ function sampledConstruction(
       order[i] = order[j]!;
       order[j] = tmp;
     }
-    const p = orderPeak(order, pool, table, totalSize, peakNodeCap);
-    if (p < best) {
-      best = p;
-      bestOrder = [...order];
-    }
+    consider(order);
   }
-  return { peak: best, order: bestOrder, tail };
+  return done();
 }
 
 /**
- * Fast sound construction-peak witness for the self-covering whole-build `B`: the smallest peak among the
- * sampled orders (see sampledConstruction). A peak at or under budget is a GENUINE witness (that order
- * builds `B` within budget), so it is SOUND for "reachable" - it can only flip a false-dim, never invent a
- * false-reach. It does not compute the true minimum, so it may overshoot a hard-to-sample reachable build
- * (a conservative dim, closed only by the exact engine). Deterministic. INF if `B` is not self-covering.
+ * Fast sound construction-peak witness for the self-covering whole-build `B`: the smallest schedule peak
+ * among the sampled orders (see sampledConstruction). A peak at or under budget is a GENUINE witness: that
+ * order's schedule builds `B` within budget and replays legally through the oracle (web/test/
+ * witness-schedule.test.ts pins this), so it is SOUND for "reachable" - it can only flip a false-dim, never
+ * invent a false-reach. It does not compute the true minimum, so it may overshoot a hard-to-sample
+ * reachable build (a conservative dim, closed only by the exact engine). Deterministic. INF if `B` is not
+ * self-covering.
  */
 export function minPeakSampled(
   cons: ReachCon[],
@@ -671,10 +743,9 @@ export function minPeakSampled(
 
 /**
  * The construction ORDER behind the witness: the constellations of self-covering build `B` in an order
- * that builds it within `budget` points held at once (granting members first, in their peak-minimizing
- * order, then the zero-grant members), or null when no sampled order fits the budget. This is the
- * design-agnostic substrate for guided build order; the transient scaffold to hold (and refund) at each
- * step is a further step the UI design will specify (see the guided-build-order spec). Deterministic.
+ * whose schedule builds it within `budget` points held at once (granting members first, in their
+ * peak-minimizing order, then the zero-grant members), or null when no sampled order fits the budget.
+ * buildOrderPath turns it into the step-by-step schedule (scaffolds held and refunded). Deterministic.
  */
 export function minPeakSampledOrder(
   cons: ReachCon[],
@@ -777,13 +848,25 @@ export function churnPoints(steps: BuildStep[]): number {
   return pts;
 }
 
+/** A member order's legal schedule: the most points held at once, and the steps when that fits the budget. */
+interface Schedule {
+  peak: number; // when over budget: the running total at the first over-cap add, itself already over
+  steps: BuildStep[] | null; // present exactly when peak <= budget
+}
+
+/** The scaffold-search node cap for the cold path (the panel's schedule): find the exact min subset,
+ *  immune to the witness's sampling cap. */
+const REPLAY_CAP = 300_000;
+
 /**
  * Emit the add/complete/refund schedule for a member `order` plus zero-grant `tail`: at each step,
  * hold the exact scaffold SET peakToReach picks (crossroads-biased), draining refunds the moment
- * they are legal (docs/devotion-system.md: removal cannot strand a dependent). Null when any step
- * would exceed `budget` or a held scaffold can never be legally refunded - the honest signal that
- * this ORDER does not work; the caller decides what other order to try. This is buildOrderPath's
- * legality-bearing loop, extracted so more than one order generator can feed it.
+ * they are legal (docs/devotion-system.md: removal cannot strand a dependent). A scaffold swap adds
+ * the new scaffold before the old one may go, so the peak counts both, as the game does. Returns the
+ * peak, and the steps only when it fits `budget`; null when a step's deficit cannot be scaffolded or
+ * a held scaffold can never be legally refunded - the honest signal that this ORDER does not work;
+ * the caller decides what other order to try. This is the one legality-bearing loop: the peak witness
+ * scores every candidate order with it, and buildOrderPath renders its steps.
  */
 function emitSchedule(
   order: ReachCon[],
@@ -791,14 +874,20 @@ function emitSchedule(
   pool: ReachCon[],
   table: CoverTable,
   budget: number,
-): BuildStep[] | null {
-  const REPLAY_CAP = 300_000; // cold path: find the exact min subset, immune to the sampling node cap
+  peakNodeCap = REPLAY_CAP,
+): Schedule | null {
   const steps: BuildStep[] = [];
+  let peak = 0;
+  const step = (kind: BuildStep["kind"], conId: string, points: number, heldAfter: number): void => {
+    steps.push({ kind, conId, points, heldAfter });
+    if (heldAfter > peak) peak = heldAfter;
+  };
   let grant: Vec = zero();
   let mreq: Vec = zero(); // max requirement incl. the member being placed (drives the scaffold need-set)
   let creq: Vec = zero(); // max requirement over COMPLETED members only (drives refund legality)
   let held: ReachCon[] = [];
   let running = 0;
+  const over = (): Schedule => ({ peak: running, steps: null });
   // In-game refund rule: a scaffold may be refunded only if everything still standing (completed
   // members plus the other held scaffolds) keeps its requirement covered without the scaffold's grant.
   const canRefund = (s: ReachCon, keep: ReachCon[]): boolean => {
@@ -821,7 +910,7 @@ function emitSchedule(
         if (!canRefund(s, keep)) continue;
         held = keep;
         running -= s.size;
-        steps.push({ kind: "scaffold-refund", conId: s.id, points: -s.size, heldAfter: running });
+        step("scaffold-refund", s.id, -s.size, running);
         progress = true;
       }
     }
@@ -836,7 +925,7 @@ function emitSchedule(
       Math.max(0, mreq[4] - grant[4]),
     ];
     const need: ReachCon[] = [];
-    const sz = peakToReach(pool, table, def, grant, REPLAY_CAP, { collect: need, preferSmall: true });
+    const sz = peakToReach(pool, table, def, grant, peakNodeCap, { collect: need, preferSmall: true });
     if (sz >= INF) return null;
     const needIds = new Set(need.map((s) => s.id));
     drainRefunds(needIds);
@@ -845,14 +934,13 @@ function emitSchedule(
       if (!heldIds.has(s.id)) {
         held.push(s);
         running += s.size;
-        if (running > budget) return null; // an over-cap add is illegal: honest null, never an illegal step
-        steps.push({ kind: "scaffold-add", conId: s.id, points: s.size, heldAfter: running });
+        if (running > budget) return over(); // an over-cap add is illegal: no steps, never an illegal step
+        step("scaffold-add", s.id, s.size, running);
       }
     drainRefunds(needIds); // retry refunds the new scaffolds' grants may have made safe
-    if (running > budget) return null; // soundness guard
     running += m.size;
-    steps.push({ kind: "complete", conId: m.id, points: m.size, heldAfter: running });
-    if (running > budget) return null;
+    step("complete", m.id, m.size, running);
+    if (running > budget) return over();
     grant = addCap(grant, m.grant);
     creq = maxV(creq, m.req);
   }
@@ -860,10 +948,10 @@ function emitSchedule(
   if (held.length) return null; // a scaffold no drain can legally refund: honest null, never an illegal step
   for (const t of tail) {
     running += t.size;
-    steps.push({ kind: "complete", conId: t.id, points: t.size, heldAfter: running });
-    if (running > budget) return null;
+    step("complete", t.id, t.size, running);
+    if (running > budget) return over();
   }
-  return steps;
+  return { peak, steps };
 }
 
 /**
@@ -894,9 +982,13 @@ export function buildOrderPath(
   if (!parts) return null; // not self-covering
   if (parts.totalSize > budget) return null;
   const nd = needDrivenOrder(cons, B);
-  const viaGreedy = nd ? emitSchedule(nd.order, nd.tail, parts.pool, table, budget) : null;
+  const viaGreedy = nd ? (emitSchedule(nd.order, nd.tail, parts.pool, table, budget)?.steps ?? null) : null;
+  // The sampled witness comes with its own legal schedule (at the sampling cap); re-emitting its order at
+  // the cold-path cap usually finds smaller scaffolds, but the witness's schedule is the fallback so a lit
+  // build always has an order.
   const sc = sampledConstruction(cons, table, B, budget, tries, peakNodeCap);
-  const viaSampler = sc.peak <= budget ? emitSchedule(sc.order, sc.tail, parts.pool, table, budget) : null;
+  const viaSampler =
+    sc.steps === null ? null : (emitSchedule(sc.order, sc.tail, parts.pool, table, budget)?.steps ?? sc.steps);
   if (!viaGreedy || !viaSampler) return viaGreedy ?? viaSampler;
   const g = churnPoints(viaGreedy);
   const s = churnPoints(viaSampler);
@@ -997,7 +1089,7 @@ export function reachableExactFrom(cons: ReachCon[], table: CoverTable, st: Reac
       // transient crossroads peak and was the source of the off-by-one false-reaches.
       const members = [...builtCons, ...chosen];
       if (
-        peakGateReachable(members, budget) ||
+        peakGateReachable(cons, members, budget) ||
         minPeakSampled(cons, table, members, budget, GATE_WITNESS_TRIES, PEAK_NODE_CAP) <= budget
       )
         found = true;
@@ -1074,7 +1166,7 @@ export function classifyForSelection(cons: ReachCon[], table: CoverTable, st: Re
   const g = greedyFrom(cons, st, budget);
   if (g + lastGreedyBootColors() <= budget) return "reachable";
   // Peak-bounded witness for the exact resolver's blind spot. Its constructibility check models only
-  // the free crossroads seed, so it wrongly dims tight self-covering builds that are reachable only by
+  // the transient crossroads seed, so it wrongly dims tight self-covering builds that are reachable only by
   // holding transient refundable scaffolding (a crossroads or constellation beyond the seed) until the
   // build self-covers, then refunding it. When the started set is itself a complete whole-constellation
   // build (no partials), minPeakSampled samples real construction orders: a sampled peak <= budget is a
@@ -1149,10 +1241,21 @@ export function selectionMinCost(
   maxBudget = BUDGET,
 ): number {
   const st = selectionSummary(model, selected);
+  if (st.own === 0) return 0;
+  if (st.own >= maxBudget) return maxBudget;
+  return minCostFrom(cons, table, st, maxBudget) ?? maxBudget;
+}
+
+/**
+ * The smallest budget in [own, maxBudget] at which `st` classifies "reachable", or null when even
+ * maxBudget does not (a binary search: the verdict is monotone in budget). Callers that only need
+ * a number within the cap wrap it (selectionMinCost); callers explaining a dim verdict pass a bound
+ * past the cap so they can say how many points the target really needs.
+ */
+export function minCostFrom(cons: ReachCon[], table: CoverTable, st: ReachState, maxBudget: number): number | null {
   let lo = st.own; // cannot cost less than the stars already selected
-  if (lo === 0) return 0;
-  if (lo >= maxBudget) return maxBudget;
-  if (classifyForSelection(cons, table, st, maxBudget) !== "reachable") return maxBudget;
+  if (lo > maxBudget) return null;
+  if (classifyForSelection(cons, table, st, maxBudget) !== "reachable") return null;
   let hi = maxBudget;
   while (lo < hi) {
     const mid = (lo + hi) >> 1;
@@ -1171,6 +1274,12 @@ export interface ReachView {
   have: Vec; // true in-game affinity total from completed constellations (uncapped; the panel's have column)
   need: Vec;
   needSource: Map<number, string[]>;
+  /** The selection is a legal build on its own: valid (every started constellation's requirement is
+   *  met by the completed ones' affinity, docs/devotion-system.md) and constructible (it classifies
+   *  reachable at the sweep budget, which is never below the validity floor nor above 55, so that
+   *  verdict is the verdict at 55). "Reachable" alone is weaker: it means the selection can be held
+   *  within the budget with scaffolding standing, which the game would not let you finish on. */
+  legal: boolean;
 }
 
 /** One full sweep for a selection: what can be completed, what stars are reachable, and the panel vectors. */
@@ -1188,6 +1297,10 @@ export function reachabilityForSelection(
   // verdict is the current selection's - classify that once and reuse it instead of re-running the
   // (sometimes costly) resolver per complete constellation.
   const selfReachable = classifyForSelection(cons, table, st, budget) === "reachable";
+  // The validity definition in docs/devotion-system.md ("A selection is valid when..."), checked on
+  // the summary: no started constellation may need more of a color than the completed ones supply.
+  // Same comparison the affinity panel shows as have/need.
+  const selfValid = st.target.every((need, i) => need <= st.supplyUncapped[i]!);
   for (const c of model.constellations.values()) {
     const size = c.starIds.length;
     let selCount = 0;
@@ -1247,13 +1360,21 @@ export function reachabilityForSelection(
     }
     needSource.set(i, src);
   }
-  return { completable, reachableStars, have: st.supplyUncapped, need: st.target, needSource };
+  return {
+    completable,
+    reachableStars,
+    have: st.supplyUncapped,
+    need: st.target,
+    needSource,
+    legal: selfReachable && selfValid,
+  };
 }
 
 /** The full engine result one UI refresh needs for a selection: the validity floor and the sweep. */
 export interface SelectionView {
   minCost: number; // selectionMinCost: fewest points that keep this selection a legal build (the slider floor)
   reach: ReachView; // reachabilityForSelection: dimming, reachable stars, and the affinity panel vectors
+  legal: boolean; // reach.legal: the selection is a legal build within 55 (export gates on it)
   buildOrder: BuildStep[] | null; // live (tries=16) oracle-verified order to assemble the selection, or null (verified or absent)
   buildOrderStates: StepState[] | null; // per-step post-states from the verifying replay; present exactly when buildOrder is
   /** Compare mode: the verified baseline-to-current transition, with its replay's states; null
@@ -1291,6 +1412,7 @@ export function selectionView(
       return {
         minCost,
         reach,
+        legal: reach.legal,
         buildOrder: null,
         buildOrderStates: null,
         transition: { steps: gated.steps, states: gated.states, rung: raw!.rung },
@@ -1305,6 +1427,7 @@ export function selectionView(
   return {
     minCost,
     reach,
+    legal: reach.legal,
     buildOrder: gated?.steps ?? null,
     buildOrderStates: gated?.states ?? null,
     transition: null,

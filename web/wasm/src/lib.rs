@@ -30,7 +30,6 @@ impl Hasher for FxHasher {
 type FxMap = HashMap<i64, i32, BuildHasherDefault<FxHasher>>;
 
 const CAP_MAX: [i32; 5] = [20, 8, 20, 10, 20];
-const SEED: [i32; 5] = [1, 1, 1, 1, 1];
 const NOCOST: u16 = 65535;
 const BIG: i32 = 1_000_000_000;
 // Lattice strides for caps [20,8,20,10,20] -> sizes [21,9,21,11,21]; max index < LATTICE.
@@ -44,6 +43,10 @@ static mut CON_REQ: Vec<i32> = Vec::new();
 static mut CON_GRANT: Vec<i32> = Vec::new();
 static mut CON_SIZE: Vec<i32> = Vec::new();
 static mut NCON: usize = 0;
+// (con index, color) of every crossroads-like constellation: one star, no requirement, a single +1 of one
+// color (the TS crossroadsColor). The transient seed a build may draw on is +1 per color with such a
+// constellation the build is not already counting as a member or filler.
+static mut CROSSROADS: Vec<(usize, usize)> = Vec::new();
 
 // --- linear-memory marshalling helpers --------------------------------------
 /// Returns an 8-byte-aligned buffer (so the host may write u16/i32 views into it).
@@ -84,7 +87,43 @@ pub extern "C" fn init_cons(req: *const i32, grant: *const i32, size: *const i32
         CON_GRANT = std::slice::from_raw_parts(grant, ncon * 5).to_vec();
         CON_SIZE = std::slice::from_raw_parts(size, ncon).to_vec();
         NCON = ncon;
+        CROSSROADS.clear();
+        for i in 0..ncon {
+            if CON_SIZE[i] != 1 || con_req(i) != [0, 0, 0, 0, 0] {
+                continue;
+            }
+            let g = con_grant(i);
+            let mut color = usize::MAX;
+            let mut ok = true;
+            for k in 0..5 {
+                if g[k] == 0 {
+                    continue;
+                }
+                if g[k] != 1 || color != usize::MAX {
+                    ok = false;
+                    break;
+                }
+                color = k;
+            }
+            if ok && color != usize::MAX {
+                CROSSROADS.push((i, color));
+            }
+        }
     }
+}
+
+// The transient seed for a build whose constellations are flagged in `in_b`: +1 per color with a
+// crossroads-like constellation outside the build (one inside already contributes its +1 as a member).
+fn seed_for(in_b: &[bool]) -> [i32; 5] {
+    let mut seed = [0; 5];
+    unsafe {
+        for &(i, color) in CROSSROADS.iter() {
+            if !in_b[i] {
+                seed[color] = 1;
+            }
+        }
+    }
+    seed
 }
 
 // --- engine helpers ---------------------------------------------------------
@@ -119,8 +158,8 @@ fn cover_cost(deficit: &[i32; 5]) -> i32 {
     }
 }
 // Members are (req, grant, size). constructible() ignores size (it only needs the seed fixpoint).
-fn constructible(members: &[([i32; 5], [i32; 5], i32)]) -> bool {
-    let mut gain = SEED;
+fn constructible(members: &[([i32; 5], [i32; 5], i32)], seed: &[i32; 5]) -> bool {
+    let mut gain = *seed;
     let mut done = vec![false; members.len()];
     let mut placed = 0usize;
     let mut changed = true;
@@ -140,11 +179,11 @@ fn constructible(members: &[([i32; 5], [i32; 5], i32)]) -> bool {
 }
 
 // Cheap SOUND reachable proof, mirroring the TS peakGateReachable. Affinity persists, so a self-covering,
-// unit-seed-constructible build holds at most one refundable crossroads per required color: a no-refund
+// seed-constructible build holds at most one refundable crossroads per required color: a no-refund
 // schedule peaks at size + distinct_required_colors. If that fits the budget a genuine construction order
 // exists. Sound (never accepts an unbuildable build); the tight band falls through to the peak witness.
 // constructible alone is NOT sufficient - it ignores the transient crossroads peak (the false-reach bug).
-fn peak_gate_reachable(members: &[([i32; 5], [i32; 5], i32)], budget: i32) -> bool {
+fn peak_gate_reachable(members: &[([i32; 5], [i32; 5], i32)], seed: &[i32; 5], budget: i32) -> bool {
     let mut size = 0i32;
     let mut grant = [0i32; 5];
     let mut req = [0i32; 5];
@@ -165,12 +204,12 @@ fn peak_gate_reachable(members: &[([i32; 5], [i32; 5], i32)], budget: i32) -> bo
     if size + colors > budget {
         return false; // peak may exceed budget; defer to the witness
     }
-    constructible(members)
+    constructible(members, seed)
 }
 
 // --- peak witness (scaffold-then-refund construction), the TS minPeakSampled with GATE_WITNESS_TRIES=0 ---
 // Sound peak-bounded construction check: it can only flip a false-dim to reachable, never a false-reach.
-// Verdict-identical to the TS gate witness (deterministic heuristic order, no RNG).
+// Verdict-identical to the TS gate witness (deterministic candidate orders, no RNG).
 #[inline]
 fn con_req(i: usize) -> [i32; 5] {
     unsafe { [CON_REQ[i * 5], CON_REQ[i * 5 + 1], CON_REQ[i * 5 + 2], CON_REQ[i * 5 + 3], CON_REQ[i * 5 + 4]] }
@@ -195,6 +234,8 @@ struct PeakCtx<'a> {
     best: i32,
     nodes: i32,
     node_cap: i32,
+    path: Vec<usize>,      // the DFS pick sequence (con indices), so req-dependent scaffolds follow their suppliers
+    best_used: Vec<usize>, // the pick sequence behind `best` (the TS opts.collect)
 }
 impl<'a> PeakCtx<'a> {
     fn dfs(&mut self, a: [i32; 5], size: i32) {
@@ -215,6 +256,7 @@ impl<'a> PeakCtx<'a> {
         ];
         if rem == [0, 0, 0, 0, 0] {
             self.best = size;
+            self.best_used = self.path.clone();
             return;
         }
         if size + cover_cost(&rem) >= self.best {
@@ -231,26 +273,179 @@ impl<'a> PeakCtx<'a> {
                 continue;
             }
             self.used[i] = true;
+            self.path.push(ci);
             self.dfs(add_cap(&a, &con_grant(ci)), size + ssize);
+            self.path.pop();
             self.used[i] = false;
         }
     }
 }
-fn peak_to_reach(scaf: &[usize], deficit: &[i32; 5], base: &[i32; 5], node_cap: i32) -> i32 {
+// The smallest scaffold set (its size and its members in pick order) covering `deficit` given `base`;
+// size BIG (and an empty set) when it cannot be covered. `scaf` is the pool in the TS preferSmall order.
+fn peak_to_reach(scaf: &[usize], deficit: &[i32; 5], base: &[i32; 5], node_cap: i32) -> (i32, Vec<usize>) {
     let need = [deficit[0].max(0), deficit[1].max(0), deficit[2].max(0), deficit[3].max(0), deficit[4].max(0)];
     if need == [0, 0, 0, 0, 0] {
-        return 0;
+        return (0, Vec::new());
     }
-    let mut ctx = PeakCtx { scaf, need, base: *base, used: vec![false; scaf.len()], best: BIG, nodes: 0, node_cap };
+    let mut ctx = PeakCtx { scaf, need, base: *base, used: vec![false; scaf.len()], best: BIG, nodes: 0, node_cap, path: Vec::new(), best_used: Vec::new() };
     ctx.dfs([0, 0, 0, 0, 0], 0);
-    ctx.best
+    (ctx.best, ctx.best_used)
 }
 
-// Peak of the deterministic heuristic construction order for self-covering build `members` (the TS
-// minPeakSampled with tries=0). `gsorted` is every granting con index ratio-sorted; `in_b` masks B's own
-// constellations out of the scaffold pool. Returns BIG (= not within budget) if not self-covering, if the
-// build itself overflows budget, or if some step's deficit cannot be scaffolded.
-fn min_peak(members: &[([i32; 5], [i32; 5], i32)], gsorted: &[usize], in_b: &[bool], budget: i32, node_cap: i32) -> i32 {
+type Member = ([i32; 5], [i32; 5], i32); // (req, grant, size)
+
+// The peak of the legal schedule for placing the granting members in `order` then the zero-grant `tail`
+// (the TS emitSchedule's peak): before each member, hold exactly the scaffold set peak_to_reach picks
+// for the running requirement not yet covered by the placed grants, refunding held scaffolds the moment
+// the in-game rules allow (everything standing stays covered without them). A scaffold swap adds the new
+// one before the old may go, so both count. Returns the running total at the first over-budget add
+// (itself already over budget), BIG when a step's deficit cannot be scaffolded or a held scaffold can
+// never be refunded.
+fn schedule_peak(order: &[&Member], tail: &[&Member], pool: &[usize], budget: i32, node_cap: i32) -> i32 {
+    let mut grant = [0; 5];
+    let mut mreq = [0; 5]; // max requirement incl. the member being placed (drives the scaffold need-set)
+    let mut creq = [0; 5]; // max requirement over COMPLETED members only (drives refund legality)
+    let mut held: Vec<usize> = Vec::new();
+    let mut running = 0;
+    let mut peak = 0;
+    // A scaffold may be refunded only if everything still standing (completed members plus the other held
+    // scaffolds) keeps its requirement covered without its grant.
+    let can_refund = |grant: &[i32; 5], creq: &[i32; 5], s: usize, keep: &[usize]| -> bool {
+        let mut g = *grant;
+        let mut r = max_v(creq, &con_req(s));
+        for &k in keep {
+            g = add_cap(&g, &con_grant(k));
+            r = max_v(&r, &con_req(k));
+        }
+        covers(&g, &r)
+    };
+    // Refund every held scaffold outside `need` that is safe to drop; unsafe ones stay held and are
+    // retried after later adds supply replacement grants. Fixed point: one refund can unlock another.
+    let drain = |held: &mut Vec<usize>, running: &mut i32, grant: &[i32; 5], creq: &[i32; 5], need: &[usize]| {
+        let mut progress = true;
+        while progress {
+            progress = false;
+            for s in held.clone() {
+                if need.contains(&s) {
+                    continue;
+                }
+                let keep: Vec<usize> = held.iter().cloned().filter(|&k| k != s).collect();
+                if !can_refund(grant, creq, s, &keep) {
+                    continue;
+                }
+                *held = keep;
+                *running -= unsafe { CON_SIZE[s] };
+                progress = true;
+            }
+        }
+    };
+    for m in order {
+        mreq = max_v(&mreq, &m.0);
+        let def = [
+            (mreq[0] - grant[0]).max(0),
+            (mreq[1] - grant[1]).max(0),
+            (mreq[2] - grant[2]).max(0),
+            (mreq[3] - grant[3]).max(0),
+            (mreq[4] - grant[4]).max(0),
+        ];
+        let (sz, need) = peak_to_reach(pool, &def, &grant, node_cap);
+        if sz >= BIG {
+            return BIG;
+        }
+        drain(&mut held, &mut running, &grant, &creq, &need);
+        for &s in &need {
+            if held.contains(&s) {
+                continue;
+            }
+            held.push(s);
+            running += unsafe { CON_SIZE[s] };
+            if running > budget {
+                return running;
+            }
+            if running > peak {
+                peak = running;
+            }
+        }
+        drain(&mut held, &mut running, &grant, &creq, &need);
+        running += m.2;
+        if running > peak {
+            peak = running;
+        }
+        if running > budget {
+            return running;
+        }
+        grant = add_cap(&grant, &m.1);
+        creq = max_v(&creq, &m.0);
+    }
+    drain(&mut held, &mut running, &grant, &creq, &[]);
+    if !held.is_empty() {
+        return BIG;
+    }
+    for t in tail {
+        running += t.2;
+        if running > peak {
+            peak = running;
+        }
+        if running > budget {
+            return running;
+        }
+    }
+    peak
+}
+
+// The TS peelOrder, bit-for-bit: with `zero_req_first` the zero-requirement members go in front, then the
+// rest are peeled back to front - each pick is the member whose requirement, with every requirement not
+// yet peeled, is covered by the OTHER unpeeled members' grants plus the front; ties prefer the largest
+// member, then input order; when none qualifies, the smallest summed deficit.
+fn peel_order<'a>(g: &[&'a Member], zero_req_first: bool) -> Vec<&'a Member> {
+    let req_free = |m: &Member| zero_req_first && m.0 == [0, 0, 0, 0, 0];
+    let mut out: Vec<&Member> = g.iter().cloned().filter(|m| req_free(m)).collect();
+    let mut rest: Vec<&Member> = g.iter().cloned().filter(|m| !req_free(m)).collect();
+    let mut base = [0; 5];
+    for m in &out {
+        base = add_cap(&base, &m.1);
+    }
+    let mut peeled: Vec<&Member> = Vec::with_capacity(rest.len());
+    while !rest.is_empty() {
+        let mut mreq = [0; 5];
+        for m in &rest {
+            mreq = max_v(&mreq, &m.0);
+        }
+        let mut pick = 0usize;
+        let mut pick_def = i32::MAX;
+        let mut pick_size = -1;
+        for i in 0..rest.len() {
+            let mut others = base;
+            for j in 0..rest.len() {
+                if j != i {
+                    others = add_cap(&others, &rest[j].1);
+                }
+            }
+            let mut def = 0;
+            for k in 0..5 {
+                def += (mreq[k] - others[k]).max(0);
+            }
+            let size = rest[i].2;
+            if def < pick_def || (def == pick_def && size > pick_size) {
+                pick = i;
+                pick_def = def;
+                pick_size = size;
+            }
+        }
+        peeled.push(rest.remove(pick));
+    }
+    peeled.reverse();
+    out.extend(peeled);
+    out
+}
+
+// Smallest schedule peak over the deterministic candidate orders for self-covering build `members` (the
+// TS minPeakSampled with tries=0): the bootstrap heuristic (lowest requirement first, then highest grant
+// density), then each peel variant while the best so far overshoots. `scaffolds` is every granting con
+// index in the TS preferSmall order; `in_b` masks B's own constellations out of the scaffold pool. Returns
+// BIG (= not within budget) if not self-covering, if the build itself overflows budget, or if no
+// candidate's schedule exists.
+fn min_peak(members: &[Member], scaffolds: &[usize], in_b: &[bool], budget: i32, node_cap: i32) -> i32 {
     let mut tot = [0; 5];
     let mut mreq = [0; 5];
     let mut total_size = 0;
@@ -262,44 +457,27 @@ fn min_peak(members: &[([i32; 5], [i32; 5], i32)], gsorted: &[usize], in_b: &[bo
     if !covers(&tot, &mreq) || total_size > budget {
         return BIG;
     }
-    let mut g: Vec<&([i32; 5], [i32; 5], i32)> = members.iter().filter(|m| grants_v(&m.1)).collect();
-    if g.is_empty() {
-        return total_size;
-    }
+    let g: Vec<&Member> = members.iter().filter(|m| grants_v(&m.1)).collect();
+    let tail: Vec<&Member> = members.iter().filter(|m| !grants_v(&m.1)).collect();
     let reqsum = |r: &[i32; 5]| r[0] + r[1] + r[2] + r[3] + r[4];
     let ratio = |gr: &[i32; 5], sz: i32| (gr[0] + gr[1] + gr[2] + gr[3] + gr[4]) as f64 / sz as f64;
-    g.sort_by(|a, b| {
+    let mut heuristic = g.clone();
+    heuristic.sort_by(|a, b| {
         let (ra, rb) = (reqsum(&a.0), reqsum(&b.0));
         if ra != rb {
             return ra.cmp(&rb);
         }
         ratio(&b.1, b.2).partial_cmp(&ratio(&a.1, a.2)).unwrap_or(std::cmp::Ordering::Equal)
     });
-    let pool: Vec<usize> = gsorted.iter().cloned().filter(|&i| !in_b[i]).collect();
-    let mut grant = [0; 5];
-    let mut mr = [0; 5];
-    let mut size = 0;
-    let mut peak = total_size;
-    for m in &g {
-        mr = max_v(&mr, &m.0);
-        size += m.2;
-        let def = [
-            (mr[0] - grant[0]).max(0),
-            (mr[1] - grant[1]).max(0),
-            (mr[2] - grant[2]).max(0),
-            (mr[3] - grant[3]).max(0),
-            (mr[4] - grant[4]).max(0),
-        ];
-        let sc = peak_to_reach(&pool, &def, &grant, node_cap);
-        if sc >= BIG {
-            return BIG;
+    let pool: Vec<usize> = scaffolds.iter().cloned().filter(|&i| !in_b[i]).collect();
+    let mut best = schedule_peak(&heuristic, &tail, &pool, budget, node_cap);
+    for zero_req_first in [true, false] {
+        if best <= budget {
+            return best;
         }
-        if size + sc > peak {
-            peak = size + sc;
-        }
-        grant = add_cap(&grant, &m.1);
+        best = best.min(schedule_peak(&peel_order(&g, zero_req_first), &tail, &pool, budget, node_cap));
     }
-    peak
+    best
 }
 
 const PEAK_NODE_CAP: i32 = 3000;
@@ -315,7 +493,7 @@ struct Ctx<'a> {
     bcons: &'a [([i32; 5], [i32; 5], i32)],
     started: &'a [bool], // B's own constellations (started), masked out of the scaffold pool
     filler: &'a [usize], // filler index -> constellation index, to mask chosen filler too
-    gsorted: &'a [usize], // every granting constellation, ratio-sorted: the scaffold pool source
+    scaffolds: &'a [usize], // every granting constellation in the TS preferSmall order: the scaffold pool source
     seen: FxMap,
     found: bool,
 }
@@ -335,15 +513,15 @@ impl<'a> Ctx<'a> {
             for &c in &self.chosen {
                 members.push((self.fr[c], self.fg[c], self.fs[c]));
             }
-            if peak_gate_reachable(&members, self.budget) {
-                self.found = true;
-                return;
-            }
             let mut in_b = self.started.to_vec();
             for &c in &self.chosen {
                 in_b[self.filler[c]] = true;
             }
-            if min_peak(&members, self.gsorted, &in_b, self.budget, PEAK_NODE_CAP) <= self.budget {
+            if peak_gate_reachable(&members, &seed_for(&in_b), self.budget) {
+                self.found = true;
+                return;
+            }
+            if min_peak(&members, self.scaffolds, &in_b, self.budget, PEAK_NODE_CAP) <= self.budget {
                 self.found = true;
             }
             return;
@@ -447,14 +625,24 @@ pub extern "C" fn reachable_exact(ptr: *const i32, _len: usize, budget: i32) -> 
         let fs: Vec<i32> = filler.iter().map(|&i| CON_SIZE[i]).collect();
         let nf = filler.len();
 
-        // Every granting constellation, ratio-sorted: the witness's scaffold pool (B is masked out per call).
-        let mut gsorted: Vec<usize> = (0..NCON)
+        // Every granting constellation in the TS peakToReach preferSmall order (requirement-free first, then
+        // smallest, then densest): the witness's scaffold pool (B is masked out per call; a stable sort of
+        // the whole set then filtered equals the TS sort of the filtered pool).
+        let mut scaffolds: Vec<usize> = (0..NCON)
             .filter(|&i| CON_GRANT[i * 5] | CON_GRANT[i * 5 + 1] | CON_GRANT[i * 5 + 2] | CON_GRANT[i * 5 + 3] | CON_GRANT[i * 5 + 4] != 0)
             .collect();
-        gsorted.sort_by(|&a, &b| {
+        scaffolds.sort_by(|&a, &b| {
+            let free_a = con_req(a) == [0, 0, 0, 0, 0];
+            let free_b = con_req(b) == [0, 0, 0, 0, 0];
+            if free_a != free_b {
+                return free_b.cmp(&free_a); // requirement-free first
+            }
+            if CON_SIZE[a] != CON_SIZE[b] {
+                return CON_SIZE[a].cmp(&CON_SIZE[b]); // smallest first
+            }
             let ra = (CON_GRANT[a * 5] + CON_GRANT[a * 5 + 1] + CON_GRANT[a * 5 + 2] + CON_GRANT[a * 5 + 3] + CON_GRANT[a * 5 + 4]) as f64 / CON_SIZE[a] as f64;
             let rb = (CON_GRANT[b * 5] + CON_GRANT[b * 5 + 1] + CON_GRANT[b * 5 + 2] + CON_GRANT[b * 5 + 3] + CON_GRANT[b * 5 + 4]) as f64 / CON_SIZE[b] as f64;
-            rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+            rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal) // densest first
         });
 
         let mut found = false;
@@ -490,7 +678,7 @@ pub extern "C" fn reachable_exact(ptr: *const i32, _len: usize, budget: i32) -> 
                 bcons: &bcons,
                 started: &started,
                 filler: &filler,
-                gsorted: &gsorted,
+                scaffolds: &scaffolds,
                 seen: FxMap::default(),
                 found: false,
             };
