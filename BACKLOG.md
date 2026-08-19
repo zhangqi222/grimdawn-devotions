@@ -772,11 +772,6 @@ artifact policy, item source, grimtools boundary).
    at build 19149150 - and is designed so that this walk resolves more of
    those `unknown` items automatically once it lands, with no change to the
    CLI's interface.
-4. **Ship `/items/` on the existing Pages deploy** (after 1). Publish the
-   prototype plus derived parquet at a subpath, with the tier-1 source facet.
-   Not "one workflow edit": CI cannot regenerate parquet (Windows-only
-   extraction), so it depends on step 1's fetchable release; also resolve the
-   prototype's CDN-loaded DuckDB against the self-contained deploy ethos.
 
 ### Unsequenced follow-ups
 
@@ -799,61 +794,60 @@ artifact policy, item source, grimtools boundary).
   per tier (a Fast 1h axe, a scepter, a Slow 2h mace) pins them.
 - **AND toggle within stat families.** OR is the only launch semantics
   (R16); the stats table already supports AND via `GROUP BY/HAVING`.
-- **Pet-skill stat rollup.** Pet chains are relations only (`spawns_pet`);
-  rolling pet-skill stats into the filterable stats table is deferred.
-- **Exception-only stat-label generator.** Decompose stat-id naming into
-  candidate game tags, verify against `Text_EN`, hand-curate only the misses;
-  scales item stat labels to 13 locales without hand-authoring 700+ ids.
+- **Pet stats in the filterable stats table.** `pet_ranks.parquet` now rolls a
+  summon's pet up for its skill panel (the creature's resistances plus its
+  rank-scaled abilities), but those rows never reach `stats.parquet`, so no
+  facet can ask "items whose summoned pet deals fire damage". Folding them in
+  needs a `source` value of its own and a decision about which rank to report,
+  since a pet stat has three breakpoints where an item stat has one.
+- **Player-level pet scaling.** A pet's base life, offensive and defensive
+  ability live in its `characterAttributeEquations` bio record, written in
+  `charLevel`, and 18 of the 421 `(summon skill, ability record)` grant pairs
+  set their level to a `charLevel` equation, across 4 distinct ability records.
+  `pet_ranks` reports summon RANK, so none of it is evaluated;
+  a panel showing pet damage is a rank comparison, not a character sheet.
+- **Stat labels: page-half consumption.** The data half shipped on
+  `feat/skill-item-dataset`: `scripts/build_stat_item_tags.py` derives
+  `data/stat-item-tags.json` (440 stat ids to 248 game tags, 41 explicitly
+  non-display, zero unresolved), and all 13 `game.<lang>.json` carry the tags.
+  What remains is on the page side. `web/src/core/statFormat.ts` `classify()`
+  still falls through to `litT(humanize(id))` for the ids it has no catalog key
+  for, which is a hardcoded English literal reaching users in every locale.
+  Consult `stat-item-tags.json` (via a `statTags.ts` map, same shape as
+  `STAT_FORMAT_TAGS`) immediately before that fallback, using `gameStrippedT`,
+  and add a guard test asserting every id in the emitted datasets either
+  resolves to a tag, is a declared non-display id, or is a weapon token.
+  `web/test/i18nBoundary.test.ts` cannot catch this today because `litT()` is a
+  legitimate descriptor.
+  Caveat inherited from the data half: 29 of the 248 tags are value-suffix or
+  value-embedded (`tagDamageModifierDamageMult` is `Total Damage Modified by
+  {%.0f0}%`, `DamageStun` is `Stun target{%t0}`) and do not reduce to a bare
+  label by stripping tokens. Either accept an awkward stripped label for those,
+  keep the existing `stat.override.*` app text, or take the value-templated row
+  shape (see the "Heal label full-template upgrade" item), which would render
+  the game's exact sentence in every language.
 
-## Game text tables are stale against the current inputs
+- **`i18n-tables` extracts destructively.** The recipe `rm -rf`s each
+  `extracted/text_<lang>` before running ArchiveTool, and that call ends in
+  `|| true`. A `_require-game-closed` guard now covers the case that actually
+  bit (the game holding the archives open), but a corrupt or unreadable arc
+  still loses the extracted tree and reports the language as merely skipped.
+  Extract to a temp dir and swap into place only on success, the way
+  `dataset_release.py` `cmd_fetch` already does for downloads.
 
-`data/i18n/game.*.json` has not been regenerated since `devotions.json` /
-`resistance-reduction.json` last changed, and one gap is user visible today:
-`tagGDX3ItemAwakenedSetC202Name` is referenced by `data/resistance-reduction.json`
-but exists only in `game.en.json`, so 12 locales fall back to English for that RR
-source name. A `just i18n-tables` run fixes it.
+- **Swapped-pet nodes duplicate their base summon's whole block.**
+  `stormtotem01b_petmodifier` and `summon_celestialguardian1b` reproduce the
+  base summon's entire `pet_ranks` block (41 and 35 rows) rather than a delta,
+  so the two rows of a swapped-pet pair are near-duplicates. That is the table's
+  stated design (a node reports what its pet *is*, not a diff), but it doubles
+  the payload for those pairs and the page will need to decide whether to show
+  both.
 
-The pet-modifier fix (`fix/rr-pet-modifier-sources`) raises the stakes: re-running
-`just parse-rr` takes the catalogue from 539 to 591 sources, and 34 of the tags the
-new rows name (Raging Tempest, Hellfire Mine, Hexflame, Veilpiercer, ...) are in no
-`game.*.json` yet, so those rows would render as raw tag keys. Whoever regenerates
-`data/resistance-reduction.json` must run `just i18n-tables` in the same pass -
-that is `just migrate`, which also stamps the current Steam buildid (24756825, not
-yet in `data/steam-build-versions.json`).
-
-The same run also drops `tagEnemyTrapA03` and `tagPetThermiteMineA01` from every
-locale. That is not game-version drift: both still exist in the installed game
-(`extracted/text_en`), and `grep -rl` finds them in no input file, only inside
-the generated tables themselves. They are orphans left over from an earlier
-input set, and a regen correctly stops emitting them.
-
-The 2026-08-06 stat-label audit hand-inserted its own single new tag rather than
-ship that unrelated churn inside a label commit. A deliberate wholesale
-regeneration pass is still worth doing; `scripts/build_game_tables.py` already
-reports `omitted: N` per language, which is the signal to check afterwards.
-
-The 2026-08-06 constellation-description change hit the same problem at larger
-scale: adding `description_tag` made `collect_referenced_tags` newly pull in 105
-`tagDevotion_*Desc` keys, but a plain `just i18n-tables` run also carried the
-usual unrelated churn described above, plus more of it than in the label-audit
-case, since non-English locales differed from each other too, not just from
-`en`. Rather than ship that, the new keys were added to all 13 committed tables
-by hand-merging (`original` union `{new tagDevotion_*Desc keys}`), not by
-committing a literal `just i18n-tables` output. That means the committed tables
-are currently not byte-reproducible from `just i18n-tables` alone: re-running it
-will surface the same churn again, and that is expected, not a new regression.
-It is one more reason the wholesale regeneration pass above is worth doing: it
-would restore reproducibility.
-
-The non-English churn is larger than the English case because of an asymmetry
-in how each is sourced: `en` reads from the already-extracted, version-pinned
-`extracted/text_en`, while every other locale is re-extracted fresh from
-whatever `resources/Text_<LANG>.arc` the locally installed game currently ships,
-via `ArchiveTool`. When the local install has patched past the version
-`extracted/` and the committed data were built from, the non-English tables pick
-up that newer patch's text (renamed/added/removed item and enemy tags) while
-`en` does not, which is why cs/de/es/ja/ru/zh saw extra changes beyond
-`tagGDX3ItemAwakenedSetC202Name` and the two orphans.
+- **`pet_ranks` carries presentation noise.** `skillTargetRadius` and duration
+  rows (2.4, 3.3, 3.8, 5.0) appear as stat lines no in-game card shows, the same
+  class as the CC-immunity rows deliberately kept. No honest predicate separates
+  them from real content at the data layer (five candidates were tested and each
+  also condemned real stats), so the filtering decision belongs to the page.
 
 ## Devotion search: follow-ups from the branch review
 
@@ -944,6 +938,151 @@ and the matching head of `scripts/gt_star_table.ts`. Only the debug port differs
 so it should be a parameter. Find the block by name rather than by line number:
 the save-reader work shifted those lines.
 
+## Wire a Python type-checker into `just check`
+
+`just check` runs `fmt-check test lint lint-py typecheck`, but `typecheck` is
+`tsc --noEmit` over the web sources only and `lint-py` is ruff, which lints
+without checking types. Nothing type-checks `scripts/`, so the Python half of the
+repo has no equivalent gate and agents working there see IDE diagnostics that no
+recipe would ever have caught.
+
+`uvx ty check scripts/` reported 106 diagnostics. Two reductions have landed or
+are known:
+
+- 36 were the `importlib.util.spec_from_file_location` preamble failing to narrow
+  its two Optionals, three per file across thirteen files. Fixed in 569643c.
+- 16 more were sibling-script imports (`build_deposit`, `gd_dbr`,
+  `parse_devotions`, `gd_tex`, `gditems_core`, `gditems_duckdb`) that resolve once
+  ty is given `--extra-search-path scripts`. A `ty.toml` should encode this rather
+  than every caller passing the flag; note that `[environment] root = ["scripts"]`
+  was tried and did NOT work, so the config key needs checking against ty's
+  current schema.
+
+That leaves 44, which is the actual work:
+
+- 32 are in `scripts/gt_audit.py` alone, a genuine cleanup rather than boilerplate.
+- The rest are unresolved third-party imports (`duckdb`, `PIL`, `lzstring`).
+  These scripts declare deps in PEP 723 `# /// script` blocks that `uv run
+  --script` resolves into ephemeral environments, so there is no persistent
+  `sys.prefix` for ty's `--python` to point at. Decide whether to maintain a
+  checker-only venv, or to accept those as suppressed.
+
+Also worth settling in the same pass: `just test-scripts` is not part of `check`
+either. That one is deliberate, not an oversight - the justfile notes those tests
+need `extracted/text_en` and would "fail with no explanation on a clean clone
+without it". Making them skip cleanly when the extraction is absent would let
+`check` cover them.
+
+## Static page chrome does not re-render on a language switch
+
+Both the items page and the resistance-reduction page build their skeleton once and
+never rebuild it, so switching language updates the chips, the `<option>` labels and the
+table rows while the column headers, control labels, search placeholder and Reset button
+stay in the previous language.
+
+`web/src/items/adapters/tableView.ts` builds the skeleton once and `main.ts`'s `onSelect`
+calls `refresh("replace")`, which only re-renders the body. `web/src/rr/adapters/
+tableView.ts` has the identical structure, so this is an inherited pattern rather than a
+regression introduced by the items page - but the items page makes it more visible,
+because its two selects sit directly beside their stale labels.
+
+Found during the Tasks 12-13 review of the items-page build. Not fixed there because it
+predates that work and spans two pages, so it wants one change that covers both rather
+than a copy in each. The fix is to give the skeleton a rebuild path that the locale
+change calls, or to have the locale change tear down and re-render the whole view.
+
+## `/items/` effect text: the Minors from the final whole-branch review
+
+Filed rather than fixed in the final fix round, whose scope was the three Criticals
+and the two related Importants. All of these are in or around
+`web/src/items/core/effectText.ts`.
+
+They are NOT all guarded. `web/test/items/renderSweep.test.ts` reads every rendered line
+in the dataset in all 13 locales, but it only fails on lines that are visibly malformed -
+a jammed value, a NaN, an unsubstituted brace, an empty line, a dangling preposition, two
+lines in one block differing only in their numbers. Two of the bullets below render
+perfectly well-formed lines today and sail past it: "500% Fire Resistance" and "3
+Onslaught Stacks:" are in the shipped output right now with a green suite. The sweep is a
+reason these are low priority, not a reason to think they cannot reach a user.
+
+- **The game's own chance prefixes are not in the game tables.** `tagChanceOf` and
+  `tagChanceTo` ("{%.1f0}% Chance of/to ") exist in every shipped locale's `tags_ui.txt`,
+  and are exactly the split `effectText.ts` now makes between a clause and a noun phrase.
+  They are not in `data/i18n/game.<lang>.json` (`COMPOSER_TAGS` in
+  `scripts/build_game_tables.py` does not list them), and adding them is not just a list
+  entry: the English and German source text is `{%.1f0}% {^E}{Chance of {^H}`, and
+  `clean_text` strips the colour escapes but leaves the unbalanced `{`, which
+  `applyGameFormat` would then render literally ("10% {Chance of ..."). So the prefix is
+  an app catalog key (`items.effect.chanceOf` / `items.effect.chanceTo`) instead, which
+  means non-English locales fall back to English for those two words only. Fixing it
+  properly means teaching the table build about that escape, then a re-run of
+  `just i18n-tables`, then switching `withChance`'s `appT` call to `gameFormatT`.
+- **`RetaliationFixedSingleFormatTime` likewise.** "{%.1f0} Seconds" is the game's own
+  filler for the retaliation crowd-control slot ("{%t0} of Terrify Retaliation") and is
+  clean - no escape problem - but is also absent from `COMPOSER_TAGS`, so the same text is
+  composed app-side from the value and the game's `tagSecond`/`tagSeconds`. Adding it to
+  `COMPOSER_TAGS` and re-running `just i18n-tables` would let `durationSlot` use the tag.
+  One rendered line depends on it today (Uroboruuk's Visage, Spectral Binding).
+- **`{%t}` hardcodes its sign and precision.** `applyGameFormat`'s `t` conversion formats
+  through `fmtNumber(n, sign, precision, "f")` for a scalar but ignores the template's own
+  sign and precision for the `[min, max]` case, where it hardcodes `("", "0", "f")`. No
+  current template pairs a sign or a non-zero precision with a range on `%t`, so this is
+  latent.
+- **Latent `effectText` branch interactions with no data today.** Several branches have
+  zero real occurrences: a `Min`/`Max` pair on a crowd-control clause tag, a lone
+  `<X>Chance` on a clause tag, `refreshDuration`'s `Max` arriving before its `Amount`. Each
+  is covered by a unit test but by no real block, so a data change could exercise a path
+  nobody has seen output from.
+- **Duplicate and tautological tests.** `web/test/items/effectText.test.ts` has three tests
+  that assert the same Min/Max collapse with the operands reordered, and the "plain label
+  already carrying its own percent" case is handled by `valueLine` regardless of the
+  `COMPOSER` table, so a test built on it passes either way.
+- **`ComboChargeLevels` renders a colon mid-line.** Its label is literally "Onslaught
+  Stacks:", so the composed line reads "3 Onslaught Stacks:". The game presumably uses that
+  tag in a two-column layout the card does not have.
+- **Pet resistance sentinels render as numbers.** A pet creature record stores full
+  immunity as 500, so a panel reads "500% Fire Resistance". `docs/item-schema.md` records
+  that these sentinels are kept deliberately in `pet_ranks` and that filtering them is the
+  consumer's job; the `/items/` page is that consumer and does not filter them.
+
+## Task 9b's spark half is still open, and is smaller than the plan said
+
+`sparkChance` is suppressed by the placeholder-count guard while its `sparkMaxNumber`
+sibling renders its own separate "Affects up to N targets" line, so a card that should
+read "15% Chance of affecting up to 3 targets" reads only the second half. The plan
+(`docs/superpowers/plans/2026-08-17-items-page.md`, Task 9b) used to claim
+`sparkMaxNumber` was never carried into the payload; it is, on all 8 blocks that carry
+`sparkChance`, and `data/stat-item-tags.json` already maps it. That half is an
+`effectText.ts`-only change of the same shape as the proc-chance rule. The plan text is
+corrected; the `racialBonusRace` half of 9b really is a pipeline change and is unaffected.
+
+## `skillLifePercentBuffDuration` may be a third wrong NON_DISPLAY call
+
+`projectilePiercing` and `waveDistance` were declared non-display on a guess and both
+turned out to be real lines (fixed 2026-08-18). A third entry,
+`skillLifePercentBuffDuration`, is declared as "duration facet folded into the
+SkillLifePercent line". That reason does not hold for item modifiers: of the 43 records
+carrying the stat, only 6 also carry `skillLifePercent`, and those 6 are skill records
+(a devotion, two boss skills, the raven pet heal), never a `Skill_Modifier`. On the 37
+modifier records it is alone.
+
+grimtools renders it. Awakened Sphere of Many Blades
+(`records/items/awakened/gearweapons/focus/c114_focus.dbr`) carries exactly
+`characterLifeModifier 8`, `refreshCooldown* 15/1`, and `skillLifePercentBuffDuration 3`
+on its Blood of Dreeg block, and the card reads "+8% Health", the refresh sentence, and
+"Restores 3% Health Per Second" - the third line can only come from the 3. That points at
+`tagBonusLifePercentBuff` ("Restores {%.0f0}% Health Per Second"), 22 lines across 20
+items in the current dataset.
+
+What blocks the fix: on the 6 skill records the same id IS a duration in seconds (the
+raven heal is `skillLifePercent 4` with `skillLifePercentBuffDuration 1`), so aliasing it
+globally would print "Restores 1% Health Per Second" on that pet panel - trading a missing
+item line for a wrong pet line. `data/stat-item-tags.json` is a flat id-to-tag map with no
+notion of the carrier's `Class`, so honouring both readings needs either a
+context-sensitive map or a rule in `effectText.ts` that suppresses the stat when a
+`skillLifePercent` sibling is present. `skillLifeBonusBuffDuration` (20 records) is the
+same shape and the same open question.
+
 ## `just check` does not run the script tests
 
 `check: fmt-check test lint lint-py typecheck` leaves out `test-scripts`, so the
@@ -953,11 +1092,12 @@ mislabels rows can be committed and pushed with a green hook. The Conduit amulet
 bug (every Conduit RR row named for the Occultist amulet) shipped through exactly
 that gap.
 
-Blocked on a pre-existing failure, not on the wiring. `just test-scripts` aborts
-early because `scripts/test_parse_monsters.py` has count drift against the
-1.3.0.7 dataset; adding `test-scripts` to `check` today would block every commit
-in the repo. Fix the monster count drift first, then append `test-scripts` to the
-`check` recipe.
+No longer blocked: the monster count drift that made `just test-scripts` abort
+early is gone, and as of the /items/ merge all 17 suites pass. What remains is
+the wiring decision - the suite takes about a minute against the extracted game
+data, so appending it to `check` puts that on every commit rather than on CI
+alone. Either append it to the `check` recipe or add a slower tier next to
+`test-slow` and run it before dataset changes.
 
 Note the suite is a no-op without a local game install: each test skips itself
 when `extracted/records` is absent, so this gate only bites on Windows machines

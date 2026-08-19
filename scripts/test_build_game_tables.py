@@ -11,6 +11,7 @@ from pathlib import Path
 
 here = Path(__file__).parent
 spec = importlib.util.spec_from_file_location("bgt", here / "build_game_tables.py")
+assert spec and spec.loader
 bgt = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bgt)
 
@@ -56,7 +57,10 @@ check("collects pet name_tag", "tagPetName" in referenced, True)
 check("collects weapon description_tag", "tagWeaponDesc" in referenced, True)
 check("collects stat-tags values", {"tagCharStatsDA", "Life"} <= referenced, True)
 check("collects stat-format-tags values", "DefenseConvert" in referenced, True)
-check("referenced tag count", len(referenced), 9)
+check("collects COMPOSER_TAGS", bgt.COMPOSER_TAGS <= referenced, True)
+check("collects FACET_TAGS", bgt.FACET_TAGS <= referenced, True)
+check("referenced tag count", len(referenced),
+      9 + len(bgt.COMPOSER_TAGS) + len(bgt.FACET_TAGS))
 check("collect works without stat-format-tags", "tagConA" in bgt.collect_referenced_tags(devotions, stat_tags), True)
 
 # --- rr sources: tag-prefixed name/parent collected; synthesized x: keys skipped ---
@@ -128,6 +132,68 @@ check("monster race tag collected", "tagRace005" in mon_refs, True)
 check("a null race tag is skipped", None in mon_refs, False)
 check("monsters argument is optional",
       isinstance(bgt.collect_referenced_tags({}, {}, {}, {}), set), True)
+
+# --- skill-items: mastery, skill and item name tags are collected ---
+skill_items_doc = {
+    "masteries": [{"record": "records/skills/playerclass03/_classtraining_class03.dbr",
+                   "name_tag": "tagClass03SkillName00"}],
+    "skills": [{"record": "records/skills/playerclass03/summon_hellhound1.dbr",
+                "name_tag": "tagClass03SkillName02A",
+                "pets": [{"record": "records/skills/playerclass03/pets/pet_hellhound_a01.dbr",
+                          "name_tag": "tagPetHellhoundA01",
+                          "stats": [{"source_name_tag": "tagClass03SkillName02E"},
+                                    {"source_name_tag": None}]}]},
+               {"record": "records/skills/nameless.dbr", "name_tag": None}],
+    "items": [{"record": "records/items/gearhead/b201f_head.dbr",
+               "name_tag": "tagGDX2HeadB201"}],
+}
+tags = bgt.collect_referenced_tags({}, {}, {}, {}, {}, skill_items_doc)
+check("skill-items contributes mastery name tags", "tagClass03SkillName00" in tags, True)
+check("skill-items contributes skill name tags", "tagClass03SkillName02A" in tags, True)
+check("skill-items contributes item name tags", "tagGDX2HeadB201" in tags, True)
+check("skill-items contributes pet name tags", "tagPetHellhoundA01" in tags, True)
+check("skill-items contributes pet ability name tags",
+      "tagClass03SkillName02E" in tags, True)
+check("a null name_tag is skipped, not added", None not in tags, True)
+
+# --- stat-item-tags: the raw stat id -> game tag map contributes its tag values ---
+stat_item_tags = {"offensiveFireMin": "DamageFire", "characterStrength": "tagCharAttribute02"}
+item_tag_refs = bgt.collect_referenced_tags({}, {}, {}, {}, {}, {}, stat_item_tags)
+check("stat-item-tags values collected",
+      item_tag_refs,
+      {"DamageFire", "tagCharAttribute02"} | bgt.COMPOSER_TAGS | bgt.FACET_TAGS)
+check("stat-item-tags argument is optional",
+      bgt.collect_referenced_tags({}, {}, {}, {}, {}, {}),
+      set(bgt.COMPOSER_TAGS | bgt.FACET_TAGS))
+
+# --- COMPOSER_TAGS: the formatter's grammar tags reach the built English table ---
+game_en = json.loads(Path("data/i18n/game.en.json").read_text(encoding="utf-8"))
+for tag in ("DamageSingleFormatTime", "DamageRangeFormatTime", "SkillSecondFormat",
+            "SkillDistanceFormat", "SkillCostFormat", "SkillPercentFormat",
+            "SkillIntFormat", "tagSecond", "tagSeconds",
+            "tagSkillCooldownRefresh", "tagSkillCooldownRefreshName",
+            "tagSkillDurationRefresh", "tagSkillDurationRefreshName",
+            "tagSkillDurationRefreshMax", "tagSkillDurationRefreshNameMax"):
+    check(f"composer tag reaches game.en.json: {tag}", tag in game_en, True)
+check("DamageSingleFormatTime text", game_en.get("DamageSingleFormatTime"), "over {%.1f0} Seconds")
+check("tagSkillCooldownRefreshName text", game_en.get("tagSkillCooldownRefreshName"),
+      "{%t0} to reduce cooldown of {%s1} by {%.1f2} {%z3}")
+check("tagSkillDurationRefreshName text", game_en.get("tagSkillDurationRefreshName"),
+      "{%t0} to extend duration of {%s1} by {%.1f2} {%z3}")
+check("tagSkillDurationRefreshNameMax text", game_en.get("tagSkillDurationRefreshNameMax"),
+      "{%t0} to refresh duration of {%s1} by {%.1f2} {%z3} (Max {%.1f4} {%z5})")
+
+# The gear-category chips are labelled from these tags alone. No dataset references them,
+# so nothing else would notice them going missing from the built table.
+for tag in sorted(bgt.FACET_TAGS):
+    check(f"facet tag reaches game.en.json: {tag}", tag in game_en, True)
+check("tagLootFilter10 text", game_en.get("tagLootFilter10"), "2h Melee")
+
+# --- every used trigger has a condition tag, or a trigger would render unlabelled ---
+for tag in ("tagRefreshSkillCondition03", "tagRefreshSkillCondition07",
+            "tagRefreshSkillCondition10", "tagRefreshSkillCondition11",
+            "tagRefreshSkillCondition12"):
+    check(f"trigger condition tag present: {tag}", tag in game_en, True)
 
 print("ALL PASSED" if failures == 0 else f"{failures} FAILURE(S)")
 raise SystemExit(1 if failures else 0)

@@ -1,0 +1,525 @@
+/* ABOUTME: Scoped styles for the /items/ skill-item finder page (controls, facet chips, table). */
+/* ABOUTME: Palette mirrors web/src/rr/rr.css and web/src/monsters/monsters.css (shared dark ground, gold accent). */
+.items-page {
+  --it-bg: #0d1117;
+  --it-panel: #161b22;
+  --it-panel2: #1c2330;
+  --it-line: #30363d;
+  --it-ink: #e6edf3;
+  --it-mut: #9aa4b2;
+  --it-ember: #f0c14b;
+  /* The damage-type hues, shared verbatim with the monster page (web/src/monsters/monsters.css)
+     so one type reads the same colour across the site, on the same #0d1117 ground. Chaos is the
+     one that differs: there it is a dark brick so a filled bar separates from bleeding's rose,
+     and as small text that fell short of a 4.5:1 contrast ratio, so it is lightened here. Every
+     hue clears AA against this background at body size. `elemental` is the game's own label for
+     the fire/cold/lightning trio and has no hue of its own, so it borrows the page's ember. */
+  --t-physical: #b8bcc4;
+  --t-pierce: #8fa3b8;
+  --t-fire: #e8703a;
+  --t-cold: #4db8e8;
+  --t-lightning: #e8c341;
+  --t-poison: #7fb03a;
+  --t-aether: #4ec9c9;
+  --t-chaos: #cf5a4d;
+  --t-vitality: #b06fd0;
+  --t-bleeding: #ef5c6b;
+  --t-elemental: #f0c14b;
+
+  --it-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  margin: 0;
+  background: var(--it-bg);
+  color: var(--it-ink);
+  font:
+    14px / 1.45 system-ui,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+.items-page * {
+  box-sizing: border-box;
+}
+.items-page a {
+  color: var(--it-ember);
+}
+.items-page header .app-menu {
+  margin-left: auto;
+}
+
+.items-page main {
+  /* width:100% (not just max-width) is load-bearing: the shared web/src/styles.css sets
+     `main { flex: 1; }` for the planner's row layout, and without an explicit width this
+     flex item's cross-axis stretch loses to the table's intrinsic content width - the
+     page body scrolls horizontally at narrow viewports instead of the table alone. */
+  display: block;
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 16px 24px 60px;
+}
+
+.items-page .items-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 0 14px;
+}
+.items-page .ctl-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: flex-end;
+}
+.items-page .ctl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* The mastery radiogroup is ten buttons wide, so it takes its own line and the narrower controls
+   wrap underneath rather than being squeezed onto the end of it. */
+.items-page .ctl-wide {
+  flex-basis: 100%;
+}
+.items-page .ctl-label {
+  font-family: var(--it-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--it-mut);
+}
+.items-page select,
+.items-page input[type="search"] {
+  background: var(--it-panel2);
+  color: var(--it-ink);
+  border: 1px solid var(--it-line);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+.items-page input:focus-visible,
+.items-page select:focus-visible,
+.items-page button:focus-visible,
+.items-page tr:focus-visible {
+  outline: 2px solid var(--it-ember);
+  outline-offset: 1px;
+}
+
+.items-page .items-tree-wrap {
+  border: 1px solid var(--it-line);
+  border-radius: 6px;
+  background: var(--it-panel);
+  padding: 10px 14px 14px;
+}
+/* The hover card is absolutely positioned against the box it is measured against: position it
+   against the padded wrapper instead and every card sits the label's height too high, because the
+   offsets would be computed in one box and applied in another. The tree's card is hosted by the
+   tree, the Skills column's by the whole page block - never by .tablewrap, which scrolls and
+   would clip it. */
+.items-page #items-tree,
+.items-page #items-table {
+  position: relative;
+}
+/* The skill's own card, shown while a node is hovered or focused: what an item's modifier is
+   actually modifying. Pointer-events off so moving toward the card never makes it flicker by
+   stealing the hover from the node underneath it. */
+.items-page .skill-card {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  max-width: 320px;
+  border: 1px solid var(--it-line);
+  border-radius: 6px;
+  background: var(--it-panel2);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 55%);
+  padding: 8px 11px 10px;
+  font-size: 12.5px;
+}
+.items-page .skill-card h4 {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  color: var(--it-ink);
+}
+.items-page .skill-card .skill-card-desc {
+  margin: 0 0 2px;
+  color: var(--it-mut);
+  line-height: 1.35;
+}
+.items-page .skill-card .skill-card-rank {
+  margin: 6px 0 2px;
+  font-family: var(--it-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--it-mut);
+}
+.items-page .skill-card ul {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--it-ink);
+}
+.items-page .items-tree-wrap .ctl-label {
+  display: block;
+  margin-bottom: 8px;
+}
+.items-page .items-tree-hint {
+  margin: 4px 0 0;
+  color: var(--it-mut);
+  font-size: 12.5px;
+}
+.items-page .tree-svg {
+  display: block;
+  width: 100%;
+  /* Wide enough that the icons render near their native 32px rather than shrunk, and that the
+     tree fills its panel instead of floating in a band of empty background. Still capped, so a
+     very wide window does not stretch the tree to absurdity. */
+  max-width: 900px;
+  height: auto;
+  margin: 0 auto;
+}
+/* An effect line about one damage type takes that type's colour, and the two type names inside a
+   conversion line take theirs individually. A heavier weight comes with it: physical sits close
+   to the body ink by design (it is the neutral of the set), so hue alone does not separate it. */
+.items-page .dmg {
+  font-weight: 600;
+}
+.items-page .dmg-physical {
+  color: var(--t-physical);
+}
+.items-page .dmg-pierce {
+  color: var(--t-pierce);
+}
+.items-page .dmg-fire {
+  color: var(--t-fire);
+}
+.items-page .dmg-cold {
+  color: var(--t-cold);
+}
+.items-page .dmg-lightning {
+  color: var(--t-lightning);
+}
+.items-page .dmg-poison {
+  color: var(--t-poison);
+}
+.items-page .dmg-aether {
+  color: var(--t-aether);
+}
+.items-page .dmg-chaos {
+  color: var(--t-chaos);
+}
+.items-page .dmg-vitality {
+  color: var(--t-vitality);
+}
+.items-page .dmg-bleeding {
+  color: var(--t-bleeding);
+}
+.items-page .dmg-elemental {
+  color: var(--t-elemental);
+}
+
+/* The skills column answers "why is this row here"; it is supporting detail next to the item's
+   own name, so it reads a step quieter and never crowds out the effect lines. */
+.items-page td.skills {
+  color: var(--it-mut);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+/* Each name in that column is a picker: same hover card as the tree node, and a click toggles the
+   skill. Styled as text rather than as a button so the column still reads as supporting detail. */
+.items-page .skill-pick {
+  display: block;
+  appearance: none;
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.items-page .skill-pick:hover {
+  color: var(--it-ink);
+}
+.items-page .skill-pick[aria-pressed="true"] {
+  color: var(--it-ember);
+}
+/* This row reaches that skill only through its set, which needs the whole set worn. Quiet enough
+   not to compete with the skill name it qualifies; the expanded row names the set and the count. */
+.items-page .set-badge {
+  font-family: var(--it-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--it-mut);
+  border: 1px solid var(--it-line);
+  border-radius: 3px;
+  padding: 0 3px;
+  vertical-align: 1px;
+}
+
+/* Connectors sit under the nodes (they are emitted first) and stay quiet: they exist to show
+   which upgrades belong to which skill, not to compete with the icons. */
+.items-page .tree-link {
+  stroke: #4a5560;
+  stroke-width: 3.5px;
+}
+.items-page .tree-node {
+  cursor: pointer;
+}
+.items-page .tree-node .node-shape {
+  fill: var(--it-panel2);
+  stroke: var(--it-line);
+  stroke-width: 1.5px;
+}
+.items-page .tree-node:hover .node-shape,
+.items-page .tree-node:focus-visible .node-shape {
+  stroke: var(--it-ember);
+}
+.items-page .tree-node.selected .node-shape {
+  stroke: var(--it-ember);
+  stroke-width: 3px;
+}
+.items-page .tree-node.off-tree .node-shape {
+  stroke-dasharray: 3 2;
+}
+.items-page .items-tree-offtree-caption {
+  margin: 4px 0 0;
+  color: var(--it-mut);
+  font-family: var(--it-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+.items-page .items-facets {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.items-page .facet {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 10px;
+  align-items: start;
+}
+@media (max-width: 640px) {
+  .items-page .facet {
+    grid-template-columns: 1fr;
+    gap: 5px;
+  }
+}
+.items-page .facet .lab {
+  font-family: var(--it-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--it-mut);
+  padding-top: 6px;
+}
+.items-page .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.items-page .chip {
+  appearance: none;
+  cursor: pointer;
+  font:
+    600 12px / 1 system-ui,
+    sans-serif;
+  color: var(--it-mut);
+  background: var(--it-panel2);
+  border: 1px solid var(--it-line);
+  border-radius: 5px;
+  padding: 6px 11px;
+}
+.items-page .chip:hover {
+  color: var(--it-ink);
+  border-color: #444c56;
+}
+/* The mastery picker is a radiogroup, so its buttons carry aria-checked where the facet chips
+   carry aria-pressed; both mean "on" and look the same. */
+.items-page .chip[aria-pressed="true"],
+.items-page .chip[aria-checked="true"] {
+  color: var(--it-ink);
+  background: rgba(240, 193, 75, 0.12);
+  border-color: var(--it-ember);
+  box-shadow: inset 0 0 0 1px rgba(240, 193, 75, 0.35);
+}
+
+.items-page .barfoot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding-top: 11px;
+  border-top: 1px solid var(--it-line);
+}
+.items-page .items-count {
+  color: var(--it-mut);
+  font-size: 12px;
+  font-family: var(--it-mono);
+  letter-spacing: 0.03em;
+}
+.items-page .reset {
+  margin-left: auto;
+  appearance: none;
+  cursor: pointer;
+  font: 600 11px / 1 var(--it-mono);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--it-mut);
+  background: none;
+  border: 1px solid var(--it-line);
+  border-radius: 5px;
+  padding: 7px 12px;
+}
+.items-page .reset:hover {
+  color: var(--it-ink);
+  border-color: #444c56;
+}
+
+.items-page .tablewrap {
+  overflow: auto;
+  border: 1px solid var(--it-line);
+  border-radius: 6px;
+  background: var(--it-panel);
+}
+.items-page table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 820px;
+}
+.items-page th,
+.items-page td {
+  border-bottom: 1px solid var(--it-line);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+  font-size: 12.5px;
+}
+.items-page th {
+  background: var(--it-panel2);
+  position: sticky;
+  top: 0;
+  user-select: none;
+  font-family: var(--it-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--it-mut);
+  white-space: nowrap;
+  z-index: 2;
+}
+.items-page th[data-sort] {
+  cursor: pointer;
+}
+.items-page th[data-sort]:hover {
+  color: var(--it-ember);
+}
+.items-page th .arr {
+  color: var(--it-ember);
+}
+.items-page tbody tr:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.items-page td.name {
+  font-weight: 600;
+}
+.items-page td.num {
+  font-family: var(--it-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.items-page td.effect {
+  color: var(--it-mut);
+  min-width: 22rem;
+}
+.items-page tr.empty td {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--it-mut);
+}
+
+.items-page tr.item-row {
+  cursor: pointer;
+}
+.items-page .row-caret {
+  display: inline-block;
+  width: 1em;
+  color: var(--it-mut);
+}
+
+.items-page tr.item-detail-row > td {
+  background: var(--it-panel2);
+  padding: 0;
+}
+.items-page .item-detail {
+  padding: 12px 16px 16px;
+}
+.items-page .item-detail-skills {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.items-page .skill-detail-name {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: var(--it-ember);
+}
+.items-page .skill-detail-lines,
+.items-page .item-detail-mastery,
+.items-page .pet-own-stats,
+.items-page .pet-ability ul,
+.items-page .pet-ability-plain {
+  margin: 0;
+  padding-left: 1.1em;
+}
+.items-page .item-detail-mastery {
+  margin-top: 10px;
+}
+/* The set's own bonuses, under the item's: a separate block because the player does not have
+   these by equipping this piece alone. Each heading carries the set and the piece count. */
+.items-page .set-detail {
+  margin-top: 12px;
+  border-top: 1px solid var(--it-line);
+  padding-top: 10px;
+}
+.items-page .set-detail-name {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  color: var(--it-ember);
+}
+.items-page .set-detail-name:first-child {
+  margin-top: 0;
+}
+.items-page .set-detail-skill {
+  color: var(--it-mut);
+}
+.items-page .item-detail-grimtools {
+  display: inline-block;
+  margin-top: 12px;
+  font: 600 11px / 1 var(--it-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.items-page .pet-panel {
+  margin-top: 6px;
+  border: 1px solid var(--it-line);
+  border-radius: 4px;
+  padding: 6px 10px;
+  background: var(--it-panel);
+}
+.items-page .pet-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--it-ink);
+}
+.items-page .pet-ability {
+  margin-top: 8px;
+}
+.items-page .pet-ability-name {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--it-mut);
+}

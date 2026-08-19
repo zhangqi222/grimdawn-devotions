@@ -43,7 +43,7 @@ doctor:
       *)            check winget "package manager — ships with Windows 10/11" ;;
     esac
     echo "Web data (committed; needed for build/serve):"
-    for f in data/devotions.json:parse data/resistance-reduction.json:parse-rr data/monsters.json:parse-monsters; do
+    for f in data/devotions.json:parse data/resistance-reduction.json:parse-rr data/monsters.json:parse-monsters data/skill-items.json:skill-items data/stat-item-tags.json:stat-item-tags data/skill-icons.png:skill-icons data/skill-icons.json:skill-icons; do
       path="${f%%:*}"; recipe="${f##*:}"
       if [ -f "{{justfile_directory()}}/$path" ]; then echo "  ok   $path"; ok=$((ok+1)); else echo "  MISS $path — run 'just $recipe'"; fail=$((fail+1)); fi
     done
@@ -247,8 +247,8 @@ migrate: extract parse parse-rr parse-monsters i18n-tables assets build diff-dat
 [group("devotions")]
 all: extract parse parse-rr parse-monsters i18n-tables
 
-# KEEPS the committed dataset (data/devotions.json, data/stat_labels.json) — those only
-# regenerate via `just parse` on Windows, so clean must never delete them.
+# KEEPS the committed dataset (data/devotions.json) — that only regenerates via
+# `just parse` on Windows, so clean must never delete it.
 # Remove build artifacts: web/dist, data/cover-table.bin, data/reach.wasm, web/wasm/target, csv dump.
 [group("devotions")]
 clean:
@@ -274,9 +274,13 @@ assets *ARGS: _require-game-closed
 # ArchiveTool needs an ABSOLUTE -extract path (a relative one fails to open the output file: it prints
 # progress and exits 0 but writes zero files, and pops an archivewriter.cpp assert on debug builds) and
 # stdin redirected (`< /dev/null`, else it blocks). Both are handled below.
+# Guarded because this recipe is destructive-then-re-extract: it `rm -rf`s each
+# extracted/text_<lang> BEFORE running ArchiveTool, and the extract is `|| true`. With the
+# game open the archives are locked, ArchiveTool writes nothing, and every language is
+# skipped with its extracted text already deleted.
 [group("devotions")]
 [doc("Build data/i18n/game.<lang>.json for every installed language, or just the ones you name")]
-i18n-tables *LANGS:
+i18n-tables *LANGS: _require-game-closed
     #!/usr/bin/env bash
     set -euo pipefail
     GD="{{gd_dir}}"
@@ -312,6 +316,36 @@ i18n-tables *LANGS:
       fi
       uv run scripts/build_game_tables.py --devotions "{{out}}" --stat-tags data/stat-tags.json \
         --stat-format-tags data/stat-format-tags.json --rr "{{out_rr}}" --monsters "{{out_mon}}" \
+        --skill-items "data/skill-items.json" --stat-item-tags "data/stat-item-tags.json" \
+        --text-dir "$tdir" --lang "$L" --out "data/i18n/game.$L.json"
+      built="$built $L"
+    done
+    echo "built:$built"
+    [ -n "$skipped" ] && echo "skipped:$skipped" || true
+
+# Rebuild data/i18n/game.<lang>.json from the trees `i18n-tables` already extracted.
+# Unguarded on purpose: this reads extracted/text_<lang>/ and never touches the game's
+# archives, so it is safe while Grim Dawn is running. Use it whenever only the tag
+# SELECTION changed (a new tag referenced by a dataset) rather than the game's text.
+[group("devotions")]
+[doc("Rebuild game.<lang>.json from already-extracted text, without the game")]
+i18n-tables-rebuild *LANGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    langs="{{LANGS}}"
+    if [ -z "$langs" ]; then
+      langs=$(ls -d "{{justfile_directory()}}"/extracted/text_* 2>/dev/null \
+        | sed -E 's#.*/text_##' | sort | tr '\n' ' ')
+    fi
+    built=""; skipped=""
+    for L in $langs; do
+      if [ "$L" = "en" ]; then tdir="{{text_dir}}"; else tdir="{{justfile_directory()}}/extracted/text_$L"; fi
+      if [ "$(find "$tdir" -name '*.txt' 2>/dev/null | wc -l)" -eq 0 ]; then
+        echo "skip $L (no extracted text at $tdir)"; skipped="$skipped $L"; continue
+      fi
+      uv run scripts/build_game_tables.py --devotions "{{out}}" --stat-tags data/stat-tags.json \
+        --stat-format-tags data/stat-format-tags.json --rr "{{out_rr}}" --monsters "{{out_mon}}" \
+        --skill-items "data/skill-items.json" --stat-item-tags "data/stat-item-tags.json" \
         --text-dir "$tdir" --lang "$L" --out "data/i18n/game.$L.json"
       built="$built $L"
     done
@@ -375,7 +409,38 @@ derive:
     uv run scripts/build_derived.py build --deposit-dir "{{deposit_dir}}" \
         --curation-dir "{{justfile_directory()}}/data/item-curation" --out-dir "{{derived_dir}}"
 
-# One derived acceptance query (all nine below fail on zero rows AND on oracle mismatch,
+# Emit data/skill-items.json + data/skill-items-stats.json, the committed
+# datasets behind the /items/ page (table view, then lazily loaded stat detail)
+[group("deposit")]
+skill-items:
+    uv run scripts/build_skill_items.py --deposit-dir "{{deposit_dir}}" \
+        --derived-dir "{{derived_dir}}" --stat-tags data/stat-tags.json \
+        --out "{{justfile_directory()}}/data/skill-items.json" \
+        --out-stats "{{justfile_directory()}}/data/skill-items-stats.json"
+
+# Emit data/stat-item-tags.json, the raw stat id -> game tag map that names every stat
+# the /items/ page shows. Pass --report to print each mapping with its English text, and
+# --audit-dll "{{gd_dir}}/Game.dll" to cross-check the tags against the engine's literals.
+# Fails on a stat id that no rule resolves and that is not declared non-display.
+[group("deposit")]
+[doc("Emit data/stat-item-tags.json, the raw stat id -> game tag map behind the /items/ page labels")]
+stat-item-tags *ARGS:
+    uv run scripts/build_stat_item_tags.py --deposit-dir "{{deposit_dir}}" \
+        --derived-dir "{{derived_dir}}" \
+        --out "{{justfile_directory()}}/data/stat-item-tags.json" {{ARGS}}
+
+# Pack the game's skill icons into a committed sprite sheet (Windows; needs the game)
+[group("deposit")]
+skill-icons: _require-game-closed
+    #!/usr/bin/env bash
+    set -euo pipefail
+    read -r buildid version < <(just _game-version)
+    uv run scripts/build_skill_icons.py --gd-dir "{{gd_dir}}" \
+        --out-png "{{justfile_directory()}}/data/skill-icons.png" \
+        --out-json "{{justfile_directory()}}/data/skill-icons.json" \
+        --game-version "$version" --steam-buildid "$buildid"
+
+# One derived acceptance query (all sixteen below fail on zero rows AND on oracle mismatch,
 # since each SQL gates its output on its pinned checks - see scripts/derived_queries/)
 _q-derived FILE:
     uv run scripts/build_deposit.py query --deposit-dir "{{deposit_dir}}" \
@@ -426,9 +491,29 @@ q-ae10-skill-mastery-boosts: (_q-derived "ae10_skill_mastery_boosts.sql")
 [group("deposit")]
 q-ae11-damage-conversion: (_q-derived "ae11_damage_conversion.sql")
 
-# All eleven derived acceptance queries (the AE gate from docs/item-schema.md)
+# AE12: the link-walking skill effect resolver
 [group("deposit")]
-q-ae-all: q-ae1-cold-daggers q-ae2-augments-ring-amulet q-ae3-blueprint-links q-ae4-requirement-oracles q-ae5-legendary-2h-axes q-ae6-expansion-badges q-ae7-search-de q-ae8-faction-sources q-ae9-applies-to q-ae10-skill-mastery-boosts q-ae11-damage-conversion
+q-ae12-skill-effect-walk: (_q-derived "ae12_skill_effect_walk.sql")
+
+# AE13: the mastery skills roster
+[group("deposit")]
+q-ae13-skills-roster: (_q-derived "ae13_skills_roster.sql")
+
+# AE14: skill rank breakpoints
+[group("deposit")]
+q-ae14-skill-ranks: (_q-derived "ae14_skill_ranks.sql")
+
+# AE15: item skill modifiers
+[group("deposit")]
+q-ae15-skill-modifiers: (_q-derived "ae15_skill_modifiers.sql")
+
+# AE16: the pet-chain rollup behind a summon skill's panel
+[group("deposit")]
+q-ae16-pet-ranks: (_q-derived "ae16_pet_ranks.sql")
+
+# All sixteen derived acceptance queries (the AE gate from docs/item-schema.md)
+[group("deposit")]
+q-ae-all: q-ae1-cold-daggers q-ae2-augments-ring-amulet q-ae3-blueprint-links q-ae4-requirement-oracles q-ae5-legendary-2h-axes q-ae6-expansion-badges q-ae7-search-de q-ae8-faction-sources q-ae9-applies-to q-ae10-skill-mastery-boosts q-ae11-damage-conversion q-ae12-skill-effect-walk q-ae13-skills-roster q-ae14-skill-ranks q-ae15-skill-modifiers q-ae16-pet-ranks
 
 # Delete the deposit artifacts. Deliberately NOT part of `clean`: regenerating
 # them needs Windows + the game install, so `clean` must never touch them.
@@ -776,6 +861,10 @@ build: cover-table
     cp "{{justfile_directory()}}/data/grimtools-stars.json" dist/data/grimtools-stars.json
     cp "{{justfile_directory()}}/data/resistance-reduction.json" dist/data/resistance-reduction.json
     cp "{{justfile_directory()}}/data/monsters.json" dist/data/monsters.json
+    cp "{{justfile_directory()}}/data/skill-items.json" dist/data/skill-items.json
+    cp "{{justfile_directory()}}/data/stat-item-tags.json" dist/data/stat-item-tags.json
+    cp "{{justfile_directory()}}/data/skill-icons.json" dist/data/skill-icons.json
+    cp "{{justfile_directory()}}/data/skill-icons.png" dist/data/skill-icons.png
     cp "{{justfile_directory()}}/data/cover-table.bin" dist/data/cover-table.bin
     mkdir -p dist/data/i18n && cp "{{justfile_directory()}}/data/i18n/"*.json dist/data/i18n/
     # Keep the fast resolver in sync with its Rust source: reach.wasm is a gitignored artifact that
@@ -804,6 +893,7 @@ serve: build
     @echo "  Planner:              http://localhost:5173/"
     @echo "  Resistance reduction: http://localhost:5173/resistance-reduction/"
     @echo "  Monster resistances:  http://localhost:5173/monster-resistances/"
+    @echo "  Skill items:          http://localhost:5173/items/"
     bunx serve "{{justfile_directory()}}/web/dist" -l 5173
 
 # Open the resistance-reduction page in the default browser (run in another shell while `serve` is up)
@@ -856,3 +946,4 @@ e2e: build
     cd "{{justfile_directory()}}/web" && bun e2e/smoke.ts
     cd "{{justfile_directory()}}/web" && bun e2e/rr-smoke.ts
     cd "{{justfile_directory()}}/web" && bun e2e/mon-smoke.ts
+    cd "{{justfile_directory()}}/web" && bun e2e/items-smoke.ts

@@ -2,13 +2,15 @@
 
 A fan-made toolkit for Grim Dawn: Python parsers turn the game's own `.dbr`
 records into clean committed datasets, and static, in-browser pages render them.
-Three pages ship today, sharing one deploy and one localization/app-menu chrome
+Four pages ship today, sharing one deploy and one localization/app-menu chrome
 but each with its own hexagonal core: the **devotion planner** (`data/devotions.json`,
 `web/src/`) renders the devotion starmap and lets you plan builds; the
 **resistance-reduction reference** (`data/resistance-reduction.json`, `web/src/rr/`)
 tabulates every RR source with a debuff ledger; the **monster resistance explorer**
 (`data/monsters.json`, `web/src/monsters/`) ranks damage types by how well enemies
-resist them and lets you filter/sort the underlying monster table. Deployed to
+resist them and lets you filter/sort the underlying monster table; the **skill-item
+browser** (`data/skill-items.json`, `web/src/items/`) lists the endgame items that
+grant or modify each mastery skill, with the game's own effect wording. Deployed to
 GitHub Pages, plus one small Cloudflare Worker (`worker/`) whose only job is to
 fetch a grimtools build past its CORS header, and save one, for the devotion
 planner's import and export.
@@ -49,6 +51,9 @@ planner's import and export.
   `just census` / `just q "SQL"` to mine it - see `docs/deposit.md`
 - Derived typed item schema (entities/stats/relations parquet): `just derive`, then
   `just q-ae-all` for the acceptance queries - see `docs/item-schema.md`
+- Emit `data/skill-items.json`, the committed dataset behind the `/items/` page: `just skill-items`
+- Emit `data/stat-item-tags.json`, the raw stat id to game tag map that names those
+  stats in every locale: `just stat-item-tags` - see `docs/i18n.md`
 - Dataset releases (parquet lives in GitHub Releases, pinned by `deposit.lock`):
   `just fetch-deposit` pulls it on any machine; `just publish-deposit` (Windows)
   releases a new build - see `docs/deposit.md`
@@ -60,11 +65,14 @@ common infrastructure. (1) The parsers (`scripts/parse_devotions.py`,
 into `data/devotions.json`, `data/resistance-reduction.json`, and
 `data/monsters.json`; extraction itself (`just extract`/`parse`/`parse-rr`/
 `parse-monsters`) is Windows-only (Crate's ArchiveTool.exe), but every dataset
-is committed so the pages build anywhere. (2) Each page (`web/src/`, `web/src/rr/`,
-`web/src/monsters/`) is hexagonal: `core/` is pure domain logic, `ports/` defines
+is committed so the pages build anywhere. The `/items/` dataset comes from the
+separate item-database pipeline instead (`just deposit` then `just derive` then
+`just skill-items`; see `docs/deposit.md` and `docs/item-schema.md`). (2) Each page
+(`web/src/`, `web/src/rr/`, `web/src/monsters/`, `web/src/items/`)
+is hexagonal: `core/` is pure domain logic, `ports/` defines
 interfaces, `adapters/` do I/O and rendering, and `app/main.ts` wires them. The
 planner and RR share `web/src/core/hashCodec.ts` for multi-select facet encoding;
-all three share `web/src/adapters/localizationAdapter.ts` and `web/src/adapters/appMenu.ts`
+all four share `web/src/adapters/localizationAdapter.ts` and `web/src/adapters/appMenu.ts`
 for the header chrome and i18n. Reachability (which constellations are still
 completable under the current selection + point budget, planner-only) runs in a
 Rust core compiled to `data/reach.wasm`, with a TS fallback in
@@ -77,6 +85,10 @@ dimming. Every page's full view state lives in its own URL hash
   game `.dbr` records to `devotions.json` / `resistance-reduction.json` / `monsters.json`
 - `data/devotions.json`, `data/resistance-reduction.json`, `data/monsters.json`
   -- committed datasets, each page's source of truth
+- `data/skill-items.json` -- committed dataset behind the `/items/` page (skills,
+  masteries, and the endgame items that boost or modify them); see `docs/item-schema.md`
+- `data/stat-item-tags.json` -- committed map from a raw GD stat id to the game tag
+  that names it, derived by `scripts/build_stat_item_tags.py`; see `docs/i18n.md`
 - `web/src/app/main.ts` -- planner entry point and wiring
 - `web/src/core/` -- pure planner logic: model, rules, reachability, aggregate, affinity
 - `web/src/core/search.ts` -- pure text-search corpus and matcher over the devotion map
@@ -85,10 +97,13 @@ dimming. Every page's full view state lives in its own URL hash
   shared localization/app-menu adapters every page uses
 - `web/src/rr/` -- resistance-reduction page (hexagonal: `core/`, `adapters/`, `app/main.ts`)
 - `web/src/monsters/` -- monster resistance explorer page (same hexagonal shape)
+- `web/src/items/` -- skill-item browser page (same hexagonal shape). `core/effectText.ts`
+  is the one to read first: it turns a modifier block's raw stats into the card lines the
+  game itself would show, and every wrong number this page has shipped came from it
 - `web/wasm/` -- Rust reachability core, built to `data/reach.wasm`
 - `web/scripts/` -- bundler, cover-table builder, perf harness, correctness fuzzer
-- `web/e2e/smoke.ts`, `web/e2e/rr-smoke.ts`, `web/e2e/mon-smoke.ts` -- headless-Chromium
-  smoke tests (one per page), driven over CDP and run together by `just e2e`
+- `web/e2e/smoke.ts`, `web/e2e/rr-smoke.ts`, `web/e2e/mon-smoke.ts`, `web/e2e/items-smoke.ts`
+  -- headless-Chromium smoke tests (one per page), driven over CDP and run together by `just e2e`
 - `worker/` -- Cloudflare Worker that fetches a grimtools build server-side (CORS blocks
   reading it from the browser) for the devotion planner's import and export features; see
   `worker/README.md`
@@ -98,6 +113,7 @@ dimming. Every page's full view state lives in its own URL hash
 - Planner: http://localhost:5173/
 - Resistance reduction: http://localhost:5173/resistance-reduction/
 - Monster resistances: http://localhost:5173/monster-resistances/
+- Skill items: http://localhost:5173/items/
 
 The deployed site is at https://tednaleid.github.io/grimdawn-devotions/ (GitHub
 Pages, auto-deployed from `main`).
