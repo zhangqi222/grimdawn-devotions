@@ -572,6 +572,14 @@ gd-audit NAME OUT="build.json":
 gt-star-table:
     bun "{{justfile_directory()}}/scripts/gt_star_table.ts"
 
+# Harvest real community builds from grimtools into the committed order-quality corpus.
+# Manual and rate-limited; never run from CI (CI only reads the committed fixture).
+[group("deposit")]
+[doc("Harvest ~75 real grimtools builds into web/test/fixtures/real-builds.json")]
+harvest-real-builds:
+    bun "{{justfile_directory()}}/scripts/gt_harvest_builds.ts" --out "{{justfile_directory()}}/web/test/fixtures/real-builds-raw.json"
+    cd "{{justfile_directory()}}/web" && bun scripts/build-real-builds-fixture.ts test/fixtures/real-builds-raw.json test/fixtures/real-builds.json
+
 # Audit a scraped build against our own data: RR ledger, monster cross-check,
 # circuit breakers, resistance cushions, and a devotion planner link.
 [group("deposit")]
@@ -672,12 +680,13 @@ wasm: _ensure-wasm-target
 test *ARGS:
     cd "{{justfile_directory()}}/web" && bun test {{ARGS}}
 
-# Slow reachability property tier: the heavy metamorphic downward-closure walk, gated behind REACH_SLOW
-# so the default suite (and the pre-commit hook) stay fast. Run before big engine changes.
+# Slow reachability property tier: the heavy metamorphic downward-closure walk and the full-corpus
+# order-quality sweep, gated behind REACH_SLOW so the default suite (and the pre-commit hook) stay
+# fast. Run before big engine changes.
 [group("check")]
-[doc("Slow reachability property tier: the heavy metamorphic downward-closure walk (REACH_SLOW)")]
+[doc("Slow reachability property tier: the heavy metamorphic walk and the full order-quality sweep (REACH_SLOW)")]
 test-slow:
-    cd "{{justfile_directory()}}/web" && REACH_SLOW=1 bun test test/reachability-monotonicity.test.ts
+    cd "{{justfile_directory()}}/web" && REACH_SLOW=1 bun test test/reachability-monotonicity.test.ts test/order-quality-mode.test.ts
 
 # Run the Python script test suites (parsers + data tools). The web suite is `just test`.
 # Run `just extract` first: four of the six suites hard-require extracted/records and

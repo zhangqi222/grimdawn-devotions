@@ -13,6 +13,18 @@ export of a legal selection to a fresh grimtools build, associated the same way 
 `gt=`. See `docs/superpowers/specs/2026-08-09-grimtools-devotion-import-design.md`
 (import) and `docs/superpowers/specs/2026-08-16-grimtools-export-design.md` (export).
 
+- **Switched off since 2026-08-20: grimtools blocks the worker.** The Cloudflare
+  firewall in front of grimtools returns 403 to any User-Agent containing
+  `grimdawn-devotions-import`, case sensitive and site wide (calc pages, devotion.json,
+  save_build.php). Generic strings (`foo-import/1.0`, `grimdawn-devotions/1.0`, plain
+  curl) pass, so the rule names this worker specifically. It appeared within two days of
+  export (which writes builds through save_build.php) reaching main on 2026-08-18.
+  Follow-up: contact the grimtools maintainer and agree on terms (import only, a stricter
+  rate limit, a User-Agent of their choosing), then set `GRIMTOOLS_ENABLED` true in
+  `web/src/app/main.ts` and restore the cron in `.github/workflows/canary-import.yml`.
+  Do not rotate the User-Agent to get around the rule: it is a deliberate block by the
+  site owner and the honest UA is what let them block us by name rather than blanket-ban
+  Workers egress.
 - **No e2e leg for the import wiring.** The core parsing, the mapping and the panel
   adapter are unit tested, but nothing drives the three together in a browser. Belongs
   in `web/e2e/smoke.ts` beside the search checks. Note `just e2e` is not in CI, so this
@@ -81,22 +93,43 @@ wiring works unchanged. Hidden-when-filtered uses the same match set the map use
 "row" (art + stars + name?) and how selection/dimming read at constant zoom are
 the open questions.
 
-## Filtered benefits highlighted (and toggleable) in the tooltip/popover
+## Filtered benefits toggleable in the touch popover
 
-In the star/constellation tooltip, mark the bonus rows that are part of the
-active benefit filter with the same circled/selected styling the right sidebar
-uses when a benefit is picked, so it is easy to see WHICH of a node's bonuses are
-being filtered on. On touch, where the tooltip is an interactive popover, make
-those rows clickable to toggle their filter membership (add/remove the tag),
-mirroring the sidebar's `onBenefitClick`.
+Tooltip bonus and celestial-power rows already highlight their active filter
+tags with the sidebar's ring styling (vsel outline + swatch, via `tipRow` in
+`web/src/adapters/tooltipView.ts`). The remaining half: on touch, where the
+tooltip is an interactive popover, make those rows clickable to toggle their
+filter membership (add/remove the tag), mirroring the sidebar's
+`onBenefitClick`.
 
-Pointers: `web/src/adapters/tooltipView.ts` renders the bonus rows
-(`bonusRowsHtml`) - tag each row with its benefit id (`data-vid`, the same id
-space as `selectedBenefits` / `benefitCanonical`) and add the selected class when
-the id is in `selectedBenefits`. `main.ts` holds `selectedBenefits` and the
+Pointers: rows carry `data-vid` (the same id space as `selectedBenefits` /
+`benefitCanonical`). `main.ts` holds `selectedBenefits` and the
 `onBenefitClick` toggle; in touch mode, delegate clicks on tooltip benefit rows
 to the same toggle (the popover already commits via a `pointerup` delegate on
-`tooltipEl`). Reuse the sidebar's selected-benefit CSS class for consistency.
+`tooltipEl`).
+
+## Search rings: deferred follow-ups
+
+Shipped: each selected benefit tag and the text query is its own search with its
+own ring style (color + stroke dash pattern); matched stars wear a split ring
+(full circle for one search, arcs for several), the sidebar rows and search box
+are outlined in the same colors with mini patterned ring swatches, and the
+query's constellation halo is tinted its reserved color. See
+`docs/display-model.md` (emphasis channel), `web/src/core/searchRings.ts`,
+`web/src/adapters/ringPalette.ts`.
+
+- **Hover a benefit row to isolate its search on the map.** Dim every other
+  search's rings while hovering a selected row (or the search box), so a color
+  can be disambiguated without reading hues. Pointers: `powerRowHover` in
+  `web/src/app/main.ts` shows the pattern (container-level mousemove surviving
+  innerHTML re-renders); rather than a full `paintMap()` per hover, tag ring
+  groups with their search key in `ringMarkup` (`web/src/adapters/svgRenderer.ts`)
+  and toggle a dim class on non-matching `.search-ring` children.
+- **Tooltip affinity lines keep the neutral blue selected outline.** Tagged
+  bonus rows in the tooltip wear their ring style (see `setRingStyles` in
+  `web/src/adapters/tooltipView.ts`), but the Grants/Requires affinity lines
+  still outline blue when tagged - affinity tags are constellation-level filters
+  with no ring style, which is consistent, just worth knowing.
 
 ## Affinities as filter values
 
@@ -313,6 +346,56 @@ Pointers: inputs already pure (`ReachView` from `reachability.ts`,
 (e.g. `displayState.ts`), consumed by `svgRenderer.ts`'s render loop. Needs its
 own brainstorm/spec: the exact record shape, how the orthogonal opacity factors
 compose, and how much of the CSS-class language moves to computed values.
+
+## Build-order quality: deferred follow-ups
+
+- Steps-first objective revisit, keyed to `just order-quality`'s divergence
+  counter: 7 of 99 real builds at the live budget get a different schedule
+  under a steps-first objective (definition: the steps-then-churn argmin over
+  greedy, sampler, and the sampler's steps-first schedule differs in churn or
+  length from the churn-first pick). The counter compares the sampled-cap
+  steps-first schedule against the sampler pick re-emitted at the deeper
+  scaffold cap, so some divergences may vanish under re-emission; read it as
+  directional. The per-build CSV names them, so the objective question the spec
+  deferred can be settled with real examples. Pointer: the real-corpus section
+  of `web/scripts/order-quality.ts`.
+- Higher-tier constellations earlier as a tiebreak (Ted's idea): devotion
+  points arrive gradually while leveling, so among schedules of equal churn
+  and equal rows, the one that completes the build's highest-tier
+  constellation after fewer points held is more valuable in play. Metric: the
+  `heldAfter` of the `complete` step for the highest-tier member (lower is
+  better), computable from `BuildStep[]`. Open question before building: pure
+  tiebreak below churn and steps, or would a player trade a few wasted points
+  for reaching a T3 sooner (a different objective, needs its own brainstorm).
+  The harness can report the metric per build first. Pointer: quality-mode
+  `consider()` in `sampledConstruction`; `churnPoints` in
+  `web/src/core/reachability.ts` is the shape to mirror for the metric.
+- Consolidate `scripts/gt_scrape.ts` and `scripts/gt_star_table.ts` onto
+  `scripts/gt_cdp.ts` (each still carries a private copy of the same
+  chrome-headless-shell and CDP plumbing `scripts/gt_harvest_builds.ts`
+  imports from the shared module). The duplicated block is the Chrome launch,
+  `cleanup`, `pageWsUrl`, and the `CDP` class; the two scripts differ only in
+  the debug port (`gt_scrape.ts` 9412, `gt_star_table.ts` 9417), which
+  `gt_cdp.ts`'s functions already take as a parameter.
+- Harvest polish: `scripts/gt_harvest_builds.ts` reads the devotion.json
+  version through a bare in-page fetch that bypasses `fetchText`, so that one
+  request is neither delayed nor counted against the politeness cap; and the
+  catalog's `buildName` carries raw HTML entities (for example `&#39;`) into
+  fixture titles, which are display-only in test output. The next harvest
+  should also apply a minimum-star floor (in `convertRawBuild` in
+  `web/scripts/build-real-builds-fixture.ts`, or in `pickCandidates`): three
+  committed entries hold 3, 3, and 12 stars, too few to carry any ordering
+  signal. And the converter's run summary should count its `warn` lines
+  (mapped-star count against the bio's spent points) the way it counts skips.
+- Escalation control: `buildOrderEscalated` (`web/src/core/reachability.ts`,
+  tries=4096) has no caller outside `web/test/`. The guided climb has closed
+  most of the gap to the pre-climb brute-force reference (262 against 255
+  wasted points on the real corpus), and the escalated budget itself now also
+  lands at 262 in milliseconds per build, because tries only caps the fallback
+  shuffles and no longer scales quality. A background worker to run a deeper
+  search is likely no longer worth building; kept here as a stub in case the
+  remaining gap becomes worth closing, with the background-worker pointer in
+  "Guided build order: remaining follow-ups".
 
 ## Known limitations (accepted)
 
@@ -913,31 +996,6 @@ a diff against the committed tables rather than a blind regeneration. Pointers:
 `scripts/build_game_tables.py` and `scripts/parse_devotions.py`, and the
 placeholder-aware version in `gd_save.load_tags`.
 
-## Extract the shared CDP client out of the grimtools scripts
-
-`scripts/gt_star_table.ts` copies about 90 lines of CDP client verbatim from
-`scripts/gt_scrape.ts` (the Chrome launch, `cleanup`, `pageWsUrl`, and the `CDP`
-class), differing only in the debug port. A protocol fix or a Chrome-path change
-now has to be applied twice, with nothing to remind anyone the second copy
-exists.
-
-The devotion-import plan mandated the copy on the grounds that `scripts/` are
-standalone programs. That rationale does not survive contact with the repo:
-`scripts/gd_dbr.py` is already a shared helper with three Python consumers, so
-this codebase shares script helpers where it helps. The TS scripts simply never
-had a second consumer until now.
-
-Deferred rather than declined, deliberately: the extraction rewrites the very
-region of `gt_scrape.ts` that a sibling branch also modified, so doing it before
-both branches land turns a clean merge into a hand-resolved conflict. **Both have
-now landed, so this is unblocked.**
-
-Pointers: extract to `scripts/gd_cdp.ts`, mirroring `scripts/gd_dbr.py`'s role;
-the block is the Chrome launch through the `CDP` class in `scripts/gt_scrape.ts`
-and the matching head of `scripts/gt_star_table.ts`. Only the debug port differs,
-so it should be a parameter. Find the block by name rather than by line number:
-the save-reader work shifted those lines.
-
 ## Wire a Python type-checker into `just check`
 
 `just check` runs `fmt-check test lint lint-py typecheck`, but `typecheck` is
@@ -1105,3 +1163,30 @@ that have run `just extract`. That is the same audience that regenerates the
 datasets, which is the audience that needs the gate.
 
 Pointers: the `check` recipe and the `test-scripts` recipe in `justfile`.
+
+## Live character location tracking (investigated, does not work)
+
+The idea: read the playing character's location and drive a map in a browser
+window on another machine, updating as they move. Investigated against a live
+game session on 2026-08-25 and **ruled out**: Grim Dawn's save files do not carry
+the player's position, and nothing they do carry is a usable substitute.
+
+Full research record, including the measurements and the events tested:
+[docs/superpowers/specs/2026-08-25-live-location-tracking-research.md](docs/superpowers/specs/2026-08-25-live-location-tracking-research.md).
+
+The short version: every save-file signal is driven by novelty (new ground, new
+loot, new riftgate) rather than presence, so it goes quiet exactly when a tracker
+would be wanted. `map.dat`'s `spawnCoords` is a real world coordinate but only
+moves when a different riftgate is activated, not on movement, area transitions,
+or quit. Fog of war is silent on an explored map. Process memory is the only
+remaining source, which is a different project with per-patch maintenance.
+
+Worth keeping if a map-rendering project ever starts: `map.dat` is plaintext, its
+`spawnCoords` is a parseable world coordinate, and `83.197, 7.711, 48.409` (region
+UID `02bb63762e4010d58ede9fb30968866b`) is the Devil's Crossing riftgate, which is
+one calibration point for a coordinate frame. The research record explains how to
+collect more.
+
+Do not embed or drive the grimtools map to deliver this: a cross-origin iframe
+cannot be scripted, so it would mean reloading their ad-supported page on a timer,
+and the same owner already firewalled our import worker.

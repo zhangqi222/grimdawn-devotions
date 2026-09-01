@@ -1,8 +1,16 @@
-// ABOUTME: Build-order quality over the pinned 150-seed corpus + the reproduction URL: per-build
-// ABOUTME: churn/steps CSV on stdout, aggregates on stderr. The launch-gate before/after tool.
-import { buildOrderPath, selectionSummary, BUDGET, churnPoints } from "../src/core/reachability";
+// ABOUTME: Build-order quality over the pinned 150-seed synthetic corpus + repro URL and the 99-build
+// ABOUTME: real corpus climb-off vs climb-on: per-build churn/steps CSV on stdout, aggregates on stderr.
+import {
+  buildOrderPath,
+  buildOrderCandidates,
+  selectionSummary,
+  BUDGET,
+  churnPoints,
+  type BuildStep,
+} from "../src/core/reachability";
 import { model, cons, table, generateValidBuild, mulberry32 } from "./reachability-fuzz";
 import { canonicalStarIds, decodeHash } from "../src/core/urlState";
+import realJson from "../test/fixtures/real-builds.json";
 
 const SEEDS = 150; // must match web/test/build-order-oracle.test.ts
 console.log("build,churn,steps");
@@ -34,3 +42,55 @@ console.error(
   `aggregate: orders=${orders}/${SEEDS} churn=${churn} steps=${stepsTotal}` +
     (rs ? ` | repro: churn=${churnPoints(rs)} steps=${rs.length}` : " | repro: NO ORDER"),
 );
+
+const real = realJson as unknown as { builds: { calc: string; title: string; starIds: string[] }[] };
+const CONFIGS = [
+  { name: "climb-off", climbEvals: 0 },
+  { name: "climb-on", climbEvals: undefined }, // undefined takes the shipped default (CLIMB_EVALS)
+] as const;
+
+const slugOf = (calc: string) => calc.slice(calc.lastIndexOf("/") + 1);
+const byChurnThenSteps = (a: BuildStep[], b: BuildStep[]) =>
+  churnPoints(a) - churnPoints(b) || a.length - b.length;
+const byStepsThenChurn = (a: BuildStep[], b: BuildStep[]) =>
+  a.length - b.length || churnPoints(a) - churnPoints(b);
+
+console.log("build,config,churn,steps,ms,divergent");
+const agg = new Map<string, { orders: number; churn: number; steps: number; divergent: number; ms: number }>();
+for (const c of CONFIGS) agg.set(c.name, { orders: 0, churn: 0, steps: 0, divergent: 0, ms: 0 });
+for (const b of real.builds) {
+  const members = selectionSummary(model, new Set(b.starIds)).built;
+  for (const cfg of CONFIGS) {
+    const t0 = performance.now();
+    const c = buildOrderCandidates(cons, table, members, BUDGET, 32, 3000, cfg.climbEvals);
+    const ms = performance.now() - t0;
+    // `pick` reproduces buildOrderPath's rule exactly (churn, then steps, greedy on a full tie,
+    // over the two shipped generators), so the churn and steps columns are the panel's own numbers.
+    // `alt` is the steps-first alternative over every candidate the sampler tracked.
+    const shipped = [c.greedy, c.sampler].filter((s): s is BuildStep[] => s !== null);
+    const pool = [...shipped, c.samplerStepsFirst].filter((s): s is BuildStep[] => s !== null);
+    const a = agg.get(cfg.name)!;
+    a.ms += ms;
+    if (shipped.length === 0) {
+      console.log(`${slugOf(b.calc)},${cfg.name},none,none,${ms.toFixed(1)},`);
+      continue;
+    }
+    const pick = [...shipped].sort(byChurnThenSteps)[0]!;
+    const alt = [...pool].sort(byStepsThenChurn)[0]!;
+    const divergent = churnPoints(pick) !== churnPoints(alt) || pick.length !== alt.length;
+    a.orders++;
+    a.churn += churnPoints(pick);
+    a.steps += pick.length;
+    if (divergent) a.divergent++;
+    console.log(
+      `${slugOf(b.calc)},${cfg.name},${churnPoints(pick)},${pick.length},${ms.toFixed(1)},${divergent ? 1 : 0}`,
+    );
+  }
+}
+for (const cfg of CONFIGS) {
+  const a = agg.get(cfg.name)!;
+  console.error(
+    `real corpus @ ${cfg.name}: orders=${a.orders}/${real.builds.length} churn=${a.churn} ` +
+      `steps=${a.steps} divergent=${a.divergent} mean_ms=${(a.ms / real.builds.length).toFixed(1)}`,
+  );
+}

@@ -66,12 +66,15 @@ test("the final step's state agrees with the Affinity panel (supply/target)", ()
 });
 
 // Aggregate quality pins (the churn CI net, spec 2026-07-19-need-driven-ordering-design.md):
-// measured on this corpus with the need-driven greedy, 2% slack. Baseline before the greedy:
-// orders=150 churn=81 steps=2741. Measured after: orders=150 churn=35 steps=2711.
+// measured on this corpus, 2% slack. Baseline before the need-driven greedy: orders=150 churn=81
+// steps=2741. With the greedy: orders=150 churn=35 steps=2711. With the quality-mode sampler
+// (spec 2026-08-23-shorter-build-orders-design.md): orders=150 churn=19 steps=2591.
+// With the guided climb (spec 2026-08-24-guided-build-order-search-design.md): orders=150 churn=12 steps=2609.
+// With each heuristic start climbed independently (same spec): orders=150 churn=12 steps=2597.
 // Update these deliberately when the algorithm improves; a silent regression must fail here.
 const ORDER_FLOOR = 150;
-const CHURN_PIN = 36;
-const STEPS_PIN = 2766;
+const CHURN_PIN = 13;
+const STEPS_PIN = 2649;
 
 test("seeded corpus: aggregate churn and steps hold their pins; no orders lost", () => {
   let orders = 0;
@@ -98,6 +101,6 @@ test("the reproduction URL's order meets its quality pins", () => {
   const members = selectionSummary(model, decoded!.selected).built;
   const steps = buildOrderPath(cons, table, members, 55, 16);
   expect(steps).not.toBeNull();
-  expect(churnPoints(steps!)).toBeLessThanOrEqual(4); // measured exact at Task 4b (down from 26)
-  expect(steps!.length).toBeLessThanOrEqual(23); // measured exact at Task 4b (down from 35)
+  expect(churnPoints(steps!)).toBeLessThanOrEqual(3); // measured exact on the guided climb; re-record deliberately on algorithm changes
+  expect(steps!.length).toBeLessThanOrEqual(23); // measured exact on the guided climb; re-record deliberately on algorithm changes
 });

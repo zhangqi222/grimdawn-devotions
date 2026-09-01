@@ -44,18 +44,30 @@ import {
   normalizeQuery,
 } from "../core/urlState";
 import { parseTag } from "../core/benefitTag";
+import { benefitRingOrder, magnitudeWeights, reconcileRingSlots, ringMap } from "../core/searchRings";
+import {
+  benefitRingColor,
+  benefitRingDash,
+  QUERY_RING_COLOR,
+  QUERY_RING_DASH,
+  RING_STYLE_COUNT,
+  type RingStyle,
+} from "../adapters/ringPalette";
 import { searchCorpus, matchQuery, type SearchMatch } from "../core/search";
 import { resolveIndex } from "../adapters/searchIndex";
 import { mountSearchPanel } from "../adapters/searchPanel";
 import { mapStars, invertStarTable, toGrimtoolsSkills, type StarTable } from "../core/grimtools";
 import { mountImportPanel, type ExportErrorCode, type ExportState, type ImportState } from "../adapters/importPanel";
+import { mountSavePanel } from "../adapters/savePanel";
+import { parseSave } from "../core/gdSave";
 import { makeWorkerGateway } from "../adapters/grimtoolsWorkerGateway";
+import { disabledGateway } from "../adapters/grimtoolsGatewayDisabled";
 import type { ExportBase, FetchBuildResult } from "../ports/GrimtoolsGateway";
 import { affinityTotals } from "../core/affinity";
 import {
-  starsGranting,
+  starValuesGranting,
   availableBonusIds,
-  starsGrantingPet,
+  starValuesGrantingPet,
   availablePetKeys,
   availablePowers,
 } from "../core/aggregate";
@@ -70,8 +82,11 @@ const STEAMDB_PATCHNOTES_URL = "https://steamdb.info/patchnotes/"; // per-build 
 declare const __IMPORT_API__: string;
 declare const __BUILD_ID__: string;
 const importApi = typeof __IMPORT_API__ === "string" ? __IMPORT_API__ : "http://localhost:8787";
+// Grimtools' firewall refuses the worker's User-Agent, so the feature is switched off: the panel is
+// hidden and the gateway sends the worker nothing. Flip this to restore both.
+const GRIMTOOLS_ENABLED = false;
 // The one object that talks to the worker, both directions (see ports/GrimtoolsGateway).
-const gateway = makeWorkerGateway(importApi);
+const gateway = GRIMTOOLS_ENABLED ? makeWorkerGateway(importApi) : disabledGateway;
 const buildId = typeof __BUILD_ID__ === "string" ? __BUILD_ID__ : "dev";
 
 async function boot() {
@@ -249,6 +264,7 @@ async function boot() {
       searchIndex = resolveIndex(localization, corpus);
       searchPanel.relocalize(localization);
       importPanel.relocalize(localization);
+      savePanel.relocalize(localization);
       refresh();
     },
   });
@@ -270,26 +286,39 @@ async function boot() {
     el.addEventListener("animationend", () => el.classList.remove("flash-blocked"), { once: true });
   }
 
-  // The map stars to emphasize for the current benefit tags: player tags scan player bonuses,
-  // pet tags scan pet bonuses; affinity tags are constellation-level (see affinityFilterSets).
-  function taggedStars(): Set<StarId> {
-    const playerTags = new Set<string>();
-    const petTags = new Set<string>();
-    for (const k of selectedBenefits) {
-      const tag = parseTag(k);
-      if (tag?.kind === "player") playerTags.add(tag.statId);
-      else if (tag?.kind === "pet") petTags.add(tag.statId);
-    }
-    const out = starsGranting(model, playerTags);
-    for (const id of starsGrantingPet(model, petTags)) out.add(id);
+  // Each selected benefit tag is its own search with its own ring style (color + dash pattern,
+  // paired by palette slot). Slots persist across toggles (module state, reconciled each render):
+  // removing a tag frees only its own style and the rest stay put, which matters more than
+  // shared-link color fidelity - a fresh load reseeds in canonical order, so a reloaded link may
+  // wear different hues but marks the same searches.
+  let ringSlots = new Map<string, number>();
+  function ringStylesByTag(): Map<string, RingStyle> {
+    const order = benefitRingOrder(selectedBenefits, benefitCanonical);
+    ringSlots = reconcileRingSlots(ringSlots, order, RING_STYLE_COUNT);
+    const out = new Map<string, RingStyle>();
+    for (const [key, slot] of ringSlots) out.set(key, { color: benefitRingColor(slot), dash: benefitRingDash(slot) });
     return out;
   }
 
-  // Benefit tags and search share one glow: both mean "this node matches what you asked for".
-  function emphasizedStars(): Set<StarId> {
-    const out = taggedStars();
-    for (const id of searchMatch.stars) out.add(id);
-    return out;
+  // The per-star split rings: one star set per active search - every selected player/pet tag
+  // (player tags scan player bonuses, pet tags pet bonuses; affinity tags are constellation-level,
+  // see affinityFilterSets), then the text query in its reserved color.
+  function searchRings(): Map<StarId, { ring: RingStyle; weight: number }[]> {
+    const searches: { ring: RingStyle; stars: ReadonlyMap<StarId, number> }[] = [];
+    for (const [key, ring] of ringStylesByTag()) {
+      const tag = parseTag(key);
+      if (!tag || tag.kind === "affinity") continue; // benefitRingOrder already excludes these
+      const values =
+        tag.kind === "pet" ? starValuesGrantingPet(model, tag.statId) : starValuesGranting(model, tag.statId);
+      searches.push({ ring, stars: magnitudeWeights(values) });
+    }
+    if (query) {
+      // Text matches have no magnitude; every query ring renders at base weight.
+      const flat = new Map<StarId, number>();
+      for (const id of searchMatch.stars) flat.set(id, 0);
+      searches.push({ ring: { color: QUERY_RING_COLOR, dash: QUERY_RING_DASH }, stars: flat });
+    }
+    return ringMap(searches);
   }
 
   // The active affinity filter as grant/require sets, or undefined when no affinity tag is selected.
@@ -754,6 +783,7 @@ async function boot() {
       petCatalog,
       availPetKeys,
       baseline?.selected ?? null,
+      ringStylesByTag(),
     );
     prevBonuses = r.bonuses;
     prevPet = r.petBonuses;
@@ -761,7 +791,7 @@ async function boot() {
     petAvailHtml = r.petAvailHtml;
   }
   // The map's per-render inputs. Shared by refresh() and repaint() so the two paths cannot drift:
-  // benefit tags and search matches are unioned into one highlight set, while constellation-level
+  // benefit tags and star-level search matches become per-star split rings, while constellation-level
   // search matches go to conHighlight (a constellation hit glows the art, not its stars).
   function paintMap() {
     const diff = baseline
@@ -771,7 +801,7 @@ async function boot() {
         }
       : null;
     handle.update(state, {
-      highlight: emphasizedStars(),
+      rings: searchRings(),
       reach,
       diff,
       affinityFilter: affinityFilterSets(),
@@ -784,6 +814,7 @@ async function boot() {
   function paintSearchCount() {
     searchPanel.setCount(query ? searchMatch : null); // `query` is already normalized (trimmed)
     tip.setHighlight(query);
+    tip.setRingStyles(ringStylesByTag()); // tagged tooltip rows read like the sidebar
   }
   // The hash, written by both render paths. Search uses "replace" so typing never floods history.
   function writeHash(urlMode: "push" | "replace") {
@@ -1182,7 +1213,49 @@ async function boot() {
     }
   }
 
-  const importPanel = mountImportPanel(document.getElementById("import-panel") as HTMLElement, localization, {
+  // Reads a character straight off disk: the whole parse runs here in the page, so this path needs
+  // no service and cannot be switched off from outside. The cap follows the character's earned
+  // devotion points, so the planner opens with the same budget the character actually plays with.
+  function loadSave(bytes: Uint8Array): void {
+    const result = parseSave(bytes);
+    if (result.kind === "error") {
+      savePanel.setState({ kind: "error", code: result.code });
+      return;
+    }
+    const character = result.character;
+    const wanted = new Set<StarId>();
+    for (const dbr of character.starDbrs) {
+      const id = data.starDbrIds.get(dbr);
+      if (id) wanted.add(id); // an unknown record (a mod, or a dataset older than the save) is dropped
+    }
+    if (wanted.size === 0) {
+      savePanel.setState({ kind: "error", code: "empty" });
+      return;
+    }
+    const cap = Math.max(1, Math.min(55, character.devotionTotal));
+    state = { selected: repairSelection(model, cons, table, wanted, cap), pointCap: cap };
+    // The selection is the character's own, so any grimtools association the hash carried is stale.
+    source = "";
+    savePanel.setState({
+      kind: "done",
+      name: character.name,
+      level: character.level,
+      spent: character.devotionTotal - character.devotionUnspent,
+      total: character.devotionTotal,
+      pruned: character.starDbrs.length - state.selected.size,
+    });
+    // A full refresh, not repaint(): this replaces selection and cap wholesale, so reach, the points
+    // bar and the benefits, affinity and build-order panels are all stale, as they are after an import.
+    refresh("push");
+  }
+
+  const savePanel = mountSavePanel(document.getElementById("save-panel") as HTMLElement, localization, {
+    onBytes: loadSave,
+  });
+
+  const importHost = document.getElementById("import-panel") as HTMLElement;
+  importHost.hidden = !GRIMTOOLS_ENABLED;
+  const importPanel = mountImportPanel(importHost, localization, {
     onSubmit: (slug) => void runImport(slug),
     onExport: () => void runExport(),
   });
