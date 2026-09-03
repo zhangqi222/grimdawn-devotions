@@ -273,6 +273,16 @@ try {
     availWithBudget > 0,
     `"Available to get" lists reachable benefits while budget remains (got ${availWithBudget})`,
   );
+  // A power's own effect timers are deprecated tags: a chip never carries one. Electrocute rides on
+  // powers only, so its chip has the damage id but not the tick length.
+  const electrocuteIds = await cdp.evaluate<string>(
+    `([...document.querySelectorAll('#affinity .bgroup.avail')].find(g => (g.getAttribute('data-ids')||'').split(',').includes('offensiveSlowLightningMin'))?.getAttribute('data-ids')) || ''`,
+  );
+  check(
+    electrocuteIds.includes("offensiveSlowLightningMin") &&
+      !electrocuteIds.includes("offensiveSlowLightningDurationMin"),
+    `the Electrocute chip carries its damage id but not the power tick length (got "${electrocuteIds}")`,
+  );
   // Pet bonuses have their own "Available to get" list and, when tagged, highlight the stars that
   // grant them as a pet bonus (a pet: tag must hit petBonuses, not player bonuses).
   check(
@@ -287,12 +297,20 @@ try {
   let petMatched = false;
   for (let i = 0; i < 20; i++) {
     await Bun.sleep(100);
-    if ((await cdp.evaluate<number>("document.querySelectorAll('.search-ring').length")) > 0) {
+    if ((await cdp.evaluate<number>("document.querySelectorAll('.search-arcs').length")) > 0) {
       petMatched = true;
       break;
     }
   }
   check(petMatched, "tagging a pet bonus highlights the stars that grant it as a pet bonus");
+  // Hovering the tagged chip pulses that search's arcs on the map: the legend points at its arcs.
+  await cdp.evaluate(
+    `(() => { const g = document.querySelector('#affinity .bgroup.avail.gsel[data-ids^="pet:"]'); g.dispatchEvent(new MouseEvent('mousemove',{bubbles:true,clientX:5,clientY:5})); })()`,
+  );
+  check(
+    (await cdp.evaluate<number>("document.querySelectorAll('.search-arc.pulse').length")) > 0,
+    "hovering a tagged legend chip pulses its arcs on the map",
+  );
   // Clear the pet tag so the later 'empties' assertion sees a clean filter.
   await cdp.evaluate(
     `(() => { const g = document.querySelector('#affinity .bgroup.avail.gsel[data-ids^="pet:"]'); if (g) g.querySelector('[data-gtoggle]').dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true})); })()`,

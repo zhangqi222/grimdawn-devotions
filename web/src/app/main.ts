@@ -10,7 +10,7 @@ import {
 } from "../adapters/localizationAdapter";
 import { mountAppMenu, type AppMenuContent } from "../adapters/appMenu";
 import type { InfoPopoverText } from "../adapters/infoPopover";
-import { mountSvg } from "../adapters/svgRenderer";
+import { type StarMark, mountSvg } from "../adapters/svgRenderer";
 import { attachNav, navHandlers } from "../adapters/navController";
 import { renderBenefits, renderAffinities, powersListHtml } from "../adapters/sidebarView";
 import { buildOrderHtml, transitionHtml, buildStepPopupHtml, type NoOrderInfo } from "../adapters/buildOrderView";
@@ -40,19 +40,13 @@ import {
   canonicalBenefitIds,
   canonicalPowerStatIds,
   decodeHash,
+  deprecatedBenefitIds,
   encodeHash,
   normalizeQuery,
 } from "../core/urlState";
-import { parseTag } from "../core/benefitTag";
-import { benefitRingOrder, magnitudeWeights, reconcileRingSlots, ringMap } from "../core/searchRings";
-import {
-  benefitRingColor,
-  benefitRingDash,
-  QUERY_RING_COLOR,
-  QUERY_RING_DASH,
-  RING_STYLE_COUNT,
-  type RingStyle,
-} from "../adapters/ringPalette";
+import { parseTag, toggleTagGroup } from "../core/benefitTag";
+import { benefitMarkOrder, magnitudeWeights, reconcileMarkSlots, markMap, QUERY_MARK_KEY } from "../core/searchMarks";
+import { MARK_STYLE_COUNT, type MarkStyle, markStyle } from "../adapters/markPalette";
 import { searchCorpus, matchQuery, type SearchMatch } from "../core/search";
 import { resolveIndex } from "../adapters/searchIndex";
 import { mountSearchPanel } from "../adapters/searchPanel";
@@ -125,6 +119,7 @@ async function boot() {
   const canonical = canonicalStarIds(model);
   const statCanonical = canonicalStatIds(model);
   const benefitCanonical = canonicalBenefitIds(model);
+  const deprecatedBenefits = deprecatedBenefitIds(model);
   let state: SelectionState = { selected: new Set(), pointCap: 55 };
   // Baseline for the comparison mode: null when not comparing.
   let baseline: SelectionState | null = null;
@@ -144,7 +139,7 @@ async function boot() {
   // Decode and repair a hash into planner state. Runs at boot and on every hashchange
   // (Back/Forward, bookmark clicks, hand-edited URLs); an undecodable hash is the empty build.
   function applyHash(hash: string): void {
-    const restored = decodeHash(hash, canonical, benefitCanonical);
+    const restored = decodeHash(hash, canonical, benefitCanonical, deprecatedBenefits);
     state = restored
       ? {
           selected: repairSelection(model, cons, table, restored.selected, restored.pointCap),
@@ -167,7 +162,7 @@ async function boot() {
   // resolved strings), so the catalog is locale-independent and built once at boot.
   const allBonuses: Record<string, number> = {};
   for (const id of statCanonical) allBonuses[id] = 1;
-  for (const id of canonicalPowerStatIds(model)) allBonuses[id] = 1;
+  for (const id of canonicalPowerStatIds(model)) if (!deprecatedBenefits.has(id)) allBonuses[id] = 1;
   // The pet benefit catalog (every pet subject + its stat ids), for the pet "Available to get" list.
   // Pet stat ids are raw here (static per model); the renderer scopes them.
   const allPetBonuses: Record<string, number> = {};
@@ -286,39 +281,50 @@ async function boot() {
     el.addEventListener("animationend", () => el.classList.remove("flash-blocked"), { once: true });
   }
 
-  // Each selected benefit tag is its own search with its own ring style (color + dash pattern,
-  // paired by palette slot). Slots persist across toggles (module state, reconciled each render):
-  // removing a tag frees only its own style and the rest stay put, which matters more than
-  // shared-link color fidelity - a fresh load reseeds in canonical order, so a reloaded link may
-  // wear different hues but marks the same searches.
-  let ringSlots = new Map<string, number>();
-  function ringStylesByTag(): Map<string, RingStyle> {
-    const order = benefitRingOrder(selectedBenefits, benefitCanonical);
-    ringSlots = reconcileRingSlots(ringSlots, order, RING_STYLE_COUNT);
-    const out = new Map<string, RingStyle>();
-    for (const [key, slot] of ringSlots) out.set(key, { color: benefitRingColor(slot), dash: benefitRingDash(slot) });
+  // Each active search - every selected benefit tag, plus the text query while one is typed - has
+  // its own mark style (angle + color, paired by palette slot). Slots persist across toggles
+  // (module state, reconciled each render): removing a search frees only its own style and the
+  // rest stay put, which matters more than shared-link fidelity - a fresh load reseeds in canonical
+  // order (query last), so a reloaded link may wear different styles but marks the same searches.
+  let markSlots = new Map<string, number>();
+  function markSlotsByKey(): Map<string, number> {
+    const order = benefitMarkOrder(selectedBenefits, benefitCanonical);
+    if (query) order.push(QUERY_MARK_KEY);
+    markSlots = reconcileMarkSlots(markSlots, order, MARK_STYLE_COUNT);
+    return markSlots;
+  }
+  function markStylesByKey(): Map<string, MarkStyle> {
+    const out = new Map<string, MarkStyle>();
+    for (const [key, slot] of markSlotsByKey()) out.set(key, markStyle(slot));
     return out;
   }
+  // The query's mark style while a query is active (it holds a slot like any tag), else undefined.
+  function queryMarkStyle(): MarkStyle | undefined {
+    const slot = markSlotsByKey().get(QUERY_MARK_KEY);
+    return slot === undefined ? undefined : markStyle(slot);
+  }
 
-  // The per-star split rings: one star set per active search - every selected player/pet tag
-  // (player tags scan player bonuses, pet tags pet bonuses; affinity tags are constellation-level,
-  // see affinityFilterSets), then the text query in its reserved color.
-  function searchRings(): Map<StarId, { ring: RingStyle; weight: number }[]> {
-    const searches: { ring: RingStyle; stars: ReadonlyMap<StarId, number> }[] = [];
-    for (const [key, ring] of ringStylesByTag()) {
+  // The per-star marks: one star set per active search - every selected player/pet tag (player
+  // tags scan player bonuses, pet tags pet bonuses; affinity tags are constellation-level, see
+  // affinityFilterSets), then the text query's star hits.
+  function starMarks(): Map<StarId, StarMark[]> {
+    const searches: { mark: { style: MarkStyle; slot: number }; stars: ReadonlyMap<StarId, number> }[] = [];
+    for (const [key, slot] of markSlotsByKey()) {
+      const mark = { style: markStyle(slot), slot };
+      if (key === QUERY_MARK_KEY) {
+        // Text matches have no magnitude; every query arc renders at base width.
+        const flat = new Map<StarId, number>();
+        for (const id of searchMatch.stars) flat.set(id, 0);
+        searches.push({ mark, stars: flat });
+        continue;
+      }
       const tag = parseTag(key);
-      if (!tag || tag.kind === "affinity") continue; // benefitRingOrder already excludes these
+      if (!tag || tag.kind === "affinity") continue; // benefitMarkOrder already excludes these
       const values =
         tag.kind === "pet" ? starValuesGrantingPet(model, tag.statId) : starValuesGranting(model, tag.statId);
-      searches.push({ ring, stars: magnitudeWeights(values) });
+      searches.push({ mark, stars: magnitudeWeights(values) });
     }
-    if (query) {
-      // Text matches have no magnitude; every query ring renders at base weight.
-      const flat = new Map<StarId, number>();
-      for (const id of searchMatch.stars) flat.set(id, 0);
-      searches.push({ ring: { color: QUERY_RING_COLOR, dash: QUERY_RING_DASH }, stars: flat });
-    }
-    return ringMap(searches);
+    return markMap(searches);
   }
 
   // The active affinity filter as grant/require sets, or undefined when no affinity tag is selected.
@@ -488,6 +494,27 @@ async function boot() {
   benefitsEl.addEventListener("mouseleave", powerRowLeave);
   affinityEl.addEventListener("mouseleave", powerRowLeave);
 
+  // Hovering a tagged row or a fully tagged chip pulses that search's arcs on the map, so the
+  // legend points at its arcs. Delegated on both sidebar containers like powerRowHover (the
+  // rows are re-rendered on every refresh); a row pulses when the pointer arrives, not on every
+  // move within it, and pulses again only after the pointer has left it.
+  let pulsedKey: string | null = null;
+  const tagRowHover = (e: Event) => {
+    const row = (e.target as Element)?.closest?.(".vsel[data-vid], .vsel[data-ids], .gsel[data-ids]");
+    const key = row ? (row.getAttribute("data-vid") ?? row.getAttribute("data-ids")) : null;
+    if (key === pulsedKey) return;
+    pulsedKey = key;
+    if (!key) return;
+    handle.pulseMarks(key.split(",").flatMap((id) => markSlots.get(id) ?? []));
+  };
+  const tagRowLeave = () => {
+    pulsedKey = null;
+  };
+  benefitsEl.addEventListener("mousemove", tagRowHover);
+  affinityEl.addEventListener("mousemove", tagRowHover);
+  benefitsEl.addEventListener("mouseleave", tagRowLeave);
+  affinityEl.addEventListener("mouseleave", tagRowLeave);
+
   // Benefit selection: click a value to toggle just it; click a subject to toggle
   // all of its values (so the group reads as selected only when every value is). Attached to both
   // sidebars: the "have" benefits live in the left panel, "available to get" in the right one.
@@ -529,8 +556,9 @@ async function boot() {
       if (!group) return;
       const ids = (group.getAttribute("data-ids") ?? "").split(",").filter(Boolean);
       if (ids.length === 0) return;
-      const allSel = ids.every((id) => selectedBenefits.has(id));
-      for (const id of ids) allSel ? selectedBenefits.delete(id) : selectedBenefits.add(id);
+      // An "available to get" chip has no per-value view, so any tagged id makes it read as on and
+      // a click clears the lot; a subject row shows its values, so it completes the group instead.
+      toggleTagGroup(selectedBenefits, ids, group.classList.contains("avail"));
     }
     refresh(); // re-render benefits, re-highlight the map, and persist tags to the URL
   }
@@ -783,7 +811,7 @@ async function boot() {
       petCatalog,
       availPetKeys,
       baseline?.selected ?? null,
-      ringStylesByTag(),
+      markStylesByKey(),
     );
     prevBonuses = r.bonuses;
     prevPet = r.petBonuses;
@@ -791,7 +819,7 @@ async function boot() {
     petAvailHtml = r.petAvailHtml;
   }
   // The map's per-render inputs. Shared by refresh() and repaint() so the two paths cannot drift:
-  // benefit tags and star-level search matches become per-star split rings, while constellation-level
+  // benefit tags and star-level search matches become per-star arcs, while constellation-level
   // search matches go to conHighlight (a constellation hit glows the art, not its stars).
   function paintMap() {
     const diff = baseline
@@ -801,7 +829,8 @@ async function boot() {
         }
       : null;
     handle.update(state, {
-      rings: searchRings(),
+      marks: starMarks(),
+      queryColor: queryMarkStyle()?.color,
       reach,
       diff,
       affinityFilter: affinityFilterSets(),
@@ -812,9 +841,9 @@ async function boot() {
   // Also hands the tooltip the query, so hovering a match marks up the text that matched -
   // otherwise a hit on flavour text ("owl" inside "acknowledged") looks like a bug.
   function paintSearchCount() {
-    searchPanel.setCount(query ? searchMatch : null); // `query` is already normalized (trimmed)
+    searchPanel.setCount(query ? searchMatch : null, queryMarkStyle()); // `query` is already normalized (trimmed)
     tip.setHighlight(query);
-    tip.setRingStyles(ringStylesByTag()); // tagged tooltip rows read like the sidebar
+    tip.setMarkStyles(markStylesByKey()); // tagged tooltip rows read like the sidebar
   }
   // The hash, written by both render paths. Search uses "replace" so typing never floods history.
   function writeHash(urlMode: "push" | "replace") {
@@ -933,6 +962,10 @@ async function boot() {
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   const searchPanel = mountSearchPanel(searchPanelEl, localization, {
     initial: query,
+    onHover() {
+      const slot = markSlots.get(QUERY_MARK_KEY);
+      if (slot !== undefined) handle.pulseMarks([slot]);
+    },
     onInput(q) {
       query = normalizeQuery(q); // the same normal form the hash stores, so a shared link restores what is on screen
       clearTimeout(searchTimer);

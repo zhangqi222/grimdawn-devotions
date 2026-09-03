@@ -60,30 +60,30 @@ test("constellation Grants/Requires lines carry aff: data-vid and gain vsel when
   expect(html2).toMatch(new RegExp(`class="aff (?:met|missing) vsel" data-vid="${reqVid}"`));
 });
 
-test("a tagged bonus row wears its search's ring style: color outline and patterned swatch", () => {
+test("a tagged bonus row wears its search's mark style: color outline and mini-star swatch", () => {
   const star = [...model.stars.values()].find((s) => Object.keys(s.bonuses).length > 0)!;
   const probe = el();
   const tip = tooltipView(probe);
   tip.show(enLoc, model, star.id, 0, 0);
   const vid = (probe as any).innerHTML.match(/class="tip-bonus[^"]*" data-vid="([^"]+)"/)![1]!;
 
-  tip.setRingStyles(new Map([[vid, { color: "#3ee6d8", dash: "16 11" }]]));
+  tip.setMarkStyles(new Map([[vid, { angle: 90, color: "#3ee6d8" }]]));
   const e2 = el();
   const tip2 = tooltipView(e2);
   tip2.show(enLoc, model, star.id, 0, 0, undefined, undefined, new Set([vid]));
   const html = (e2 as any).innerHTML as string;
-  expect(html).toContain(`class="tip-bonus vsel" data-vid="${vid}" style="--ring:#3ee6d8"`);
-  expect(html).toContain('<svg class="ring-swatch"');
-  expect(html).toContain('stroke-dasharray="4.17 2.87"');
+  expect(html).toContain(`class="tip-bonus vsel" data-vid="${vid}" style="--mark:#3ee6d8"`);
+  expect(html).toContain('<svg class="mark-swatch"');
+  expect(html).toContain('<path d="M 11.96 4.04 A 5.6 5.6 0 0 1 11.96 11.96" fill="none" stroke="#3ee6d8"');
 
-  // Ring styles are module state (like the query highlight); clear them for other tests.
-  tip.setRingStyles(new Map());
+  // Mark styles are module state (like the query highlight); clear them for other tests.
+  tip.setMarkStyles(new Map());
   const e3 = el();
   tooltipView(e3).show(enLoc, model, star.id, 0, 0, undefined, undefined, new Set([vid]));
-  expect((e3 as any).innerHTML).not.toContain("ring-swatch");
+  expect((e3 as any).innerHTML).not.toContain("mark-swatch");
 });
 
-test("a tagged celestial-power stat row wears vsel and its ring style, like bonus rows", () => {
+test("a tagged celestial-power stat row wears vsel and its mark style, like bonus rows", () => {
   const taggable = (s: typeof model.stars extends Map<string, infer S> ? S : never) =>
     Object.keys(s.celestialPower?.stats ?? {}).find(
       (k) => isFilterableStat(k) && !/(Duration|Max$|Chance$)/.test(k) && !(k in s.bonuses),
@@ -92,10 +92,10 @@ test("a tagged celestial-power stat row wears vsel and its ring style, like bonu
   const vid = taggable(star)!;
   const e = el();
   const tip = tooltipView(e);
-  tip.setRingStyles(new Map([[vid, { color: "#ff9440", dash: "16 11" }]]));
+  tip.setMarkStyles(new Map([[vid, { angle: 180, color: "#ff9440" }]]));
   tip.show(enLoc, model, star.id, 0, 0, undefined, undefined, new Set([vid]));
   const html = (e as any).innerHTML as string;
-  expect(html).toContain(`class="tip-bonus vsel" data-vid="${vid}" style="--ring:#ff9440"`);
-  expect(html).toContain('<svg class="ring-swatch"');
-  tip.setRingStyles(new Map());
+  expect(html).toContain(`class="tip-bonus vsel" data-vid="${vid}" style="--mark:#ff9440"`);
+  expect(html).toContain('<svg class="mark-swatch"');
+  tip.setMarkStyles(new Map());
 });

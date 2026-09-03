@@ -150,7 +150,7 @@ test("powersListHtml sorts rows by power name, not input/constellation order", (
   expect(html.indexOf("Arcane Bomb")).toBeLessThan(html.indexOf("Wendigo's Mark"));
 });
 
-test("a selected benefit row is outlined in its search's ring color", () => {
+test("a selected benefit row is outlined in its search's mark color", () => {
   const bonusStar = [...realModel.stars.values()].find((s) => Object.keys(s.bonuses).length > 0)!;
   const statId = Object.keys(bonusStar.bonuses)[0]!;
   const el = { innerHTML: "" } as unknown as HTMLElement;
@@ -167,18 +167,17 @@ test("a selected benefit row is outlined in its search's ring color", () => {
     [],
     undefined,
     null,
-    new Map([[statId, { color: "#3ee6d8", dash: "" }]]),
+    new Map([[statId, { angle: 90, color: "#3ee6d8" }]]),
   );
   const html = (el as unknown as { innerHTML: string }).innerHTML;
-  expect(html).toMatch(/class="brow[^"]*vsel[^"]*"[^>]*style="--ring:#3ee6d8"/);
-  // The row also carries a mini ring swatch in its style; a solid style draws no dasharray.
+  expect(html).toMatch(/class="brow[^"]*vsel[^"]*"[^>]*style="--mark:#3ee6d8"/);
+  // The row also carries a mini-star swatch wearing its arc (90 degrees: across the right side).
   const row = html.match(/<div class="brow[^"]*vsel[^"]*"[^>]*>.*?<\/div>/)![0];
-  expect(row).toContain('<svg class="ring-swatch"');
-  expect(row).toContain('stroke="#3ee6d8"');
-  expect(row).not.toContain("stroke-dasharray");
+  expect(row).toContain('<svg class="mark-swatch"');
+  expect(row).toContain('<path d="M 11.96 4.04 A 5.6 5.6 0 0 1 11.96 11.96" fill="none" stroke="#3ee6d8"');
 });
 
-test("a tagged 'available to get' chip is outlined in its first selected id's ring color", () => {
+test("a tagged 'available to get' chip is outlined in its first selected id's mark color", () => {
   const el = { innerHTML: "" } as unknown as HTMLElement;
   const html = renderBenefits(
     enLoc,
@@ -193,10 +192,59 @@ test("a tagged 'available to get' chip is outlined in its first selected id's ri
     [],
     undefined,
     null,
-    new Map([["offensiveFireMin", { color: "#ff9440", dash: "16 11" }]]),
+    new Map([["offensiveFireMin", { angle: 180, color: "#ff9440" }]]),
   ).availHtml;
-  expect(html).toMatch(/class="bgroup avail gsel"[^>]*style="--ring:#ff9440"/);
-  // The chip wears the search's swatch too, with the dash pattern scaled to swatch size.
-  expect(html).toContain('<svg class="ring-swatch"');
-  expect(html).toContain('stroke-dasharray="4.17 2.87"');
+  expect(html).toMatch(/class="bgroup avail gsel"[^>]*style="--mark:#ff9440"/);
+  // The chip wears the search's swatch too, its arc centred the slot's way (180: across the bottom).
+  expect(html).toContain('<svg class="mark-swatch"');
+  expect(html).toContain('<path d="M 11.96 11.96 A 5.6 5.6 0 0 1 4.04 11.96" fill="none" stroke="#ff9440"');
+});
+
+test("a partly tagged chip is outlined as partial, keyed by its first tagged id, so the tag can be cleared", () => {
+  const twoPart: CondensedGroup[] = [
+    {
+      group: "Offense",
+      subjects: [
+        {
+          subject: litT("Cold"),
+          key: "Offense:Cold",
+          parts: [
+            { dim: "flat", value: litT("+10"), id: "offensiveColdMin" },
+            { dim: "pct", value: litT("+10%"), id: "offensiveColdModifier" },
+          ],
+        },
+      ],
+    },
+  ];
+  const styles = new Map([
+    ["offensiveColdMin", { angle: 180, color: "#3f93d8" }],
+    ["offensiveColdModifier", { angle: 0, color: "#e6c34d" }],
+  ]);
+  const render = (tagged: string[]) => {
+    const el = { innerHTML: "" } as unknown as HTMLElement;
+    return renderBenefits(
+      enLoc,
+      el,
+      emptyModel,
+      new Set(),
+      undefined,
+      new Set(tagged),
+      twoPart,
+      new Set(["offensiveColdMin"]),
+      undefined,
+      [],
+      undefined,
+      null,
+      styles,
+    ).availHtml;
+  };
+  // Only the percent id is tagged: the chip still reads as tagged, marked partial, in that id's style.
+  const partial = render(["offensiveColdModifier"]);
+  expect(partial).toMatch(/class="bgroup avail gsel partial"[^>]*style="--mark:#e6c34d"/);
+  expect(partial).toContain('<svg class="mark-swatch"');
+  // Every id tagged: plain gsel, keyed by the first id.
+  const full = render(["offensiveColdMin", "offensiveColdModifier"]);
+  expect(full).toMatch(/class="bgroup avail gsel"[^>]*style="--mark:#3f93d8"/);
+  expect(full).not.toContain("partial");
+  expect(render([])).toMatch(/class="bgroup avail"[^>]*data-ids="offensiveColdMin,offensiveColdModifier"/);
 });

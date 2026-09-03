@@ -5,7 +5,7 @@ import type { ReachView } from "../core/reachability";
 import { affinityColor, glowColor, presentAffinities } from "./affinityColors";
 import { constellationDisplay, starDisplay, edgeDisplay } from "../core/displayState";
 import { fitViewBox, toViewBoxString } from "../core/viewbox";
-import { QUERY_RING_COLOR, scaleDash, type RingStyle } from "./ringPalette";
+import { MARK_COLORS, type MarkStyle, roundedSectorPath } from "./markPalette";
 import type { AssetManifest } from "../ports/DataSource";
 
 // A constellation's identity colors = the affinities it GRANTS when fully filled (1-3).
@@ -57,67 +57,85 @@ const EDGE_OPACITY = { active: 1, attainable: 1, unattainable: 0.3 } as const;
 // The affinity match halo glows full strength on a reachable constellation and dimmer on an unreachable
 // one, so the brightness channel still reads under a filter (reachable matches are not just colored).
 const HALO_UNREACHABLE_OPACITY = 0.25;
-// Search rings orbit outside the star dot (and outside the larger power diamond).
-const RING_RADIUS = STAR_RADIUS + 11;
-const POWER_RING_RADIUS = POWER_RADIUS + 10;
-// Degrees of breathing room between the arcs of a split ring.
-const RING_GAP_DEG = 14;
-// Base ring stroke width; a star's arc thickens up to quadruple with its relative magnitude
-// weight (a per-arc SVG attribute, so each slice of a split ring scales independently). Weighted
-// arcs grow OUTWARD from a fixed inner edge - a stroke this wide centered on the base radius
-// would swallow the star dot - so the radius rises with the width (r = inner + w/2).
-const RING_WIDTH = 8;
-const RING_WEIGHT_SPAN = 3;
+// Search arcs ride a ring just outside the star dot (and outside the larger power diamond): the
+// track radius is the centre line of a base-width arc, so the ring's inner edge (7 units beyond
+// the dot) stays fixed.
+const ARC_RADIUS = STAR_RADIUS + 15;
+const POWER_ARC_RADIUS = POWER_RADIUS + 14;
+// Base arc width; an arc thickens up to triple with its star's magnitude weight for the search,
+// growing OUTWARD from the fixed inner edge (outer edge = inner + w) so the dot stays clear.
+const ARC_WIDTH = 16;
+const ARC_WEIGHT_SPAN = 2;
+// Corner radius of an arc's four rounded corners, as a fraction of its width: under the half that
+// would make a fully round end, so ends read as squared-off pills.
+const ARC_CORNER = 0.3;
+// Degrees of seam between two arcs that meet, split evenly across the seam.
+const ARC_SEAM_DEG = 6;
+// Searches sharing an angle stack outward, this far apart.
+const ARC_STACK_GAP = 2;
 
-// A clockwise ring arc from a0 to a1 (degrees, 0 = twelve o'clock) around (cx, cy).
-function ringArc(cx: number, cy: number, r: number, a0: number, a1: number): string {
-  const pt = (deg: number) => {
-    const rad = ((deg - 90) * Math.PI) / 180;
-    return `${(cx + r * Math.cos(rad)).toFixed(2)} ${(cy + r * Math.sin(rad)).toFixed(2)}`;
-  };
-  return `M ${pt(a0)} A ${r} ${r} 0 0 1 ${pt(a1)}`;
-}
-
-/** One search's marker on one star: its ring style plus that star's magnitude weight (0..1). */
-export interface RingMark {
-  ring: RingStyle;
+/** One search's marker on one star: its mark style, that star's magnitude weight (0..1), and its style slot. */
+export interface StarMark {
+  style: MarkStyle;
   weight: number;
+  slot: number;
 }
 
-// The split-ring marker for one star: a full circle for a single matching search, else the ring
-// divided evenly into one arc per search, clockwise from twelve, in ring order. Each search's
-// stroke pattern rides along as the color-vision-safe redundant channel, and each arc's width
-// scales from RING_WIDTH up to quadruple with that star's magnitude weight for the search. Fill
-// suppression and the luminous #self-glow filter come from the .search-ring CSS rules.
-function ringMarkup(cx: number, cy: number, baseR: number, marks: readonly RingMark[]): string {
-  const inner = baseR - RING_WIDTH / 2;
-  const geom = (m: RingMark) => {
-    const w = Math.round(RING_WIDTH * (1 + RING_WEIGHT_SPAN * m.weight) * 10) / 10;
-    // The dash pattern scales with the width, so dots stay dots and dashes stay dashes at any size.
-    const dash = m.ring.dash ? ` stroke-dasharray="${scaleDash(m.ring.dash, w / RING_WIDTH)}"` : "";
-    return { r: inner + w / 2, attrs: ` stroke="${m.ring.color}" stroke-width="${w}"${dash}` };
-  };
-  if (marks.length === 1) {
-    const g = geom(marks[0]!);
-    return `<g class="search-ring"><circle cx="${cx}" cy="${cy}" r="${g.r}"${g.attrs}/></g>`;
+// Each angle's arc extent on one star (degrees clockwise from up, unnormalised): the half circle
+// centred on the angle, cut back to the bisector against each neighbouring angle whose half
+// circle overlaps it, less the seam. Alone, an angle keeps its whole half. Angles come back sorted.
+function arcExtents(angles: readonly number[]): Map<number, { from: number; to: number }> {
+  const sorted = [...new Set(angles)].sort((a, b) => a - b);
+  const side = (gap: number) => (gap > 180 ? 90 : gap / 2 - ARC_SEAM_DEG / 2);
+  const out = new Map<number, { from: number; to: number }>();
+  sorted.forEach((angle, i) => {
+    const cw = sorted.length === 1 ? 360 : (sorted[(i + 1) % sorted.length]! - angle + 360) % 360;
+    const ccw = sorted.length === 1 ? 360 : (angle - sorted[(i - 1 + sorted.length) % sorted.length]! + 360) % 360;
+    out.set(angle, { from: angle - side(ccw), to: angle + side(cw) });
+  });
+  return out;
+}
+
+// The arcs marker for one star: a faint track ring plus, per matching search, a filled ring
+// sector over its angular extent (arcExtents), thickened outward by the star's magnitude weight,
+// its corners rounded (roundedSectorPath) so ends read as squared-off pills while seams sit
+// exactly at the extents. Marks sharing an angle (slots eight apart) stack outward in slot order.
+// The track look is CSS; the sector geometry and fill are attributes here.
+function arcMarkup(cx: number, cy: number, baseR: number, marks: readonly StarMark[]): string {
+  const inner = baseR - ARC_WIDTH / 2;
+  const byAngle = new Map<number, StarMark[]>();
+  for (const m of marks) {
+    const stack = byAngle.get(m.style.angle);
+    if (stack) stack.push(m);
+    else byAngle.set(m.style.angle, [m]);
   }
-  const span = 360 / marks.length;
-  const arcs = marks
-    .map((m, i) => {
-      const g = geom(m);
-      return `<path d="${ringArc(cx, cy, g.r, i * span + RING_GAP_DEG / 2, (i + 1) * span - RING_GAP_DEG / 2)}"${g.attrs}/>`;
-    })
-    .join("");
-  return `<g class="search-ring">${arcs}</g>`;
+  const arcs: string[] = [];
+  for (const [angle, { from, to }] of arcExtents([...byAngle.keys()])) {
+    let edge = inner;
+    for (const m of byAngle.get(angle)!.sort((a, b) => a.slot - b.slot)) {
+      const w = Math.round(ARC_WIDTH * (1 + ARC_WEIGHT_SPAN * m.weight) * 10) / 10;
+      const d = roundedSectorPath(cx, cy, edge, edge + w, from, to, ARC_CORNER * w);
+      arcs.push(
+        `<g class="search-arc" data-slot="${m.slot}" data-from="${from}" data-to="${to}">` +
+          `<path class="arc" d="${d}" fill="${m.style.color}"/></g>`,
+      );
+      edge += w + ARC_STACK_GAP;
+    }
+  }
+  const track = `<circle class="arc-track" cx="${cx}" cy="${cy}" r="${baseR}"/>`;
+  return `<g class="search-arcs">${track}${arcs.join("")}</g>`;
 }
 
 export interface RenderOpts {
   manifest: AssetManifest | null;
-  // Per-star search rings: each matched star maps to the ring marks (color + dash style, plus
-  // the star's magnitude weight) of the searches that hit it, in ring order (canonical benefit
-  // order, query last). One search draws a full ring; several split it into arcs, clockwise from
-  // twelve, so the ring says which searches matched, how many, and how big each grant is.
-  rings?: ReadonlyMap<StarId, readonly RingMark[]>;
+  // Per-star search marks: each matched star maps to the marks (fixed angle + color style, the
+  // star's magnitude weight, and the style slot) of the searches that hit it. Every search draws
+  // its own arc centred on its own angle, so the marker says which searches matched and how big
+  // each grant is; see arcMarkup.
+  marks?: ReadonlyMap<StarId, readonly StarMark[]>;
+  // The text query's mark color for this render (the query holds a style slot like any tag), so
+  // its constellation halo matches its star arcs. Defaults to the first palette color.
+  queryColor?: string;
   reach?: ReachView;
   diff?: { added: Set<StarId>; removed: Set<StarId> } | null;
   // When present, an affinity filter is active. A constellation matches when it provides any of these
@@ -125,8 +143,8 @@ export interface RenderOpts {
   // the rest desaturate (the mute color outcome) - the filter never changes brightness.
   affinityFilter?: { grants: Set<Affinity>; requires: Set<Affinity> };
   // When present, a text search is active; these constellations matched on name or description
-  // and glow via the search-glow halo in the query's ring color. Star-level query matches arrive
-  // as `rings` entries instead (a constellation hit glows the art, not its stars).
+  // and glow via the search-glow halo in the query's mark color. Star-level query matches arrive
+  // as `marks` entries instead (a constellation hit glows the art, not its stars).
   conHighlight?: Set<string>;
 }
 
@@ -202,12 +220,13 @@ export function constellationAt(regions: ConRegion[], wx: number, wy: number): s
 export function renderSvgMarkup(model: DevotionModel, state: SelectionState, opts: RenderOpts): string {
   const reach = opts.reach;
   const diff = opts.diff ?? null;
-  const rings = opts.rings;
+  const marks = opts.marks;
+  const queryColor = opts.queryColor ?? MARK_COLORS[0];
   const settings = {
     selected: state.selected,
     reach,
     affinityFilter: opts.affinityFilter,
-    benefitMatch: rings ? new Set(rings.keys()) : undefined,
+    benefitMatch: marks ? new Set(marks.keys()) : undefined,
     conMatch: opts.conHighlight,
     diff,
   };
@@ -277,8 +296,8 @@ export function renderSvgMarkup(model: DevotionModel, state: SelectionState, opt
     );
   }
 
-  // Search-match halo filter def: flooded with the query's ring color so a query match reads
-  // identically whether it lands on a star (a ring) or a whole constellation (this halo), and never
+  // Search-match halo filter def: flooded with the query's mark color so a query match reads
+  // identically whether it lands on a star (an arc) or a whole constellation (this halo), and never
   // as an affinity colour.
   // Only emitted when a search is active (mirrors #aff-glow/#mute being gated on affFilter above).
   //
@@ -294,9 +313,9 @@ export function renderSvgMarkup(model: DevotionModel, state: SelectionState, opt
     defs.push(
       `<filter id="search-glow" x="-150%" y="-150%" width="400%" height="400%" color-interpolation-filters="sRGB">` +
         `<feGaussianBlur in="SourceAlpha" stdDeviation="16" result="b1"/>` +
-        `<feFlood flood-color="${QUERY_RING_COLOR}" result="c1"/><feComposite in="c1" in2="b1" operator="in" result="g1"/>` +
+        `<feFlood flood-color="${queryColor}" result="c1"/><feComposite in="c1" in2="b1" operator="in" result="g1"/>` +
         `<feGaussianBlur in="SourceAlpha" stdDeviation="38" result="b2"/>` +
-        `<feFlood flood-color="${QUERY_RING_COLOR}" result="c2"/><feComposite in="c2" in2="b2" operator="in" result="g2"/>` +
+        `<feFlood flood-color="${queryColor}" result="c2"/><feComposite in="c2" in2="b2" operator="in" result="g2"/>` +
         `<feMerge>` +
         `<feMergeNode in="g2"/><feMergeNode in="g2"/><feMergeNode in="g2"/>` +
         `<feMergeNode in="g1"/><feMergeNode in="g1"/><feMergeNode in="g1"/>` +
@@ -377,7 +396,7 @@ export function renderSvgMarkup(model: DevotionModel, state: SelectionState, opt
       const glow =
         `<g filter="url(#search-glow)">` +
         `<rect class="search-glow" opacity="${op}" x="${x}" y="${y}" width="${art.w}" height="${art.h}" ` +
-        `fill="${QUERY_RING_COLOR}" mask="url(#mask-${c.id})"/>` +
+        `fill="${queryColor}" mask="url(#mask-${c.id})"/>` +
         `</g>`;
       // Off-filter constellations desaturate like an off-filter star's benefit glow does, so the
       // halo reads as "matched, off-filter" instead of vanishing.
@@ -453,18 +472,19 @@ export function renderSvgMarkup(model: DevotionModel, state: SelectionState, opt
     const dot = star.celestialPower
       ? `<polygon class="${cls}" opacity="${op}" points="${diamondPoints(cx, cy, POWER_RADIUS)}" style="${style}"/>`
       : `<circle class="${cls}" opacity="${op}" cx="${cx}" cy="${cy}" r="${STAR_RADIUS}" style="${style}"/>`;
-    // Search-ring emphasis is a SEPARATE full-opacity layer so it reads even on an unattainable (dim)
+    // Search-arc emphasis is a SEPARATE full-opacity layer so it reads even on an unattainable (dim)
     // star, whose dot keeps its attainability opacity. When the star's constellation is off the
-    // affinity filter, the ring is wrapped in #mute-wide so the whole ring desaturates too - the
-    // match then reads as "search match, off-filter" without the dot's opacity bleeding into the ring.
+    // affinity filter, the arcs are wrapped in #mute-wide so the whole marker desaturates too - the
+    // match then reads as "search match, off-filter" without the dot's opacity bleeding into the arcs.
+    // The arcs go UNDER the dots: a wide arc can reach a close neighbour, whose dot then stays on top.
     let marker = "";
-    const ringColors = sd.benefitMatch ? rings?.get(star.id) : undefined;
-    if (ringColors && ringColors.length > 0) {
-      const shape = ringMarkup(cx, cy, star.celestialPower ? POWER_RING_RADIUS : RING_RADIUS, ringColors);
+    const starMarks = sd.benefitMatch ? marks?.get(star.id) : undefined;
+    if (starMarks && starMarks.length > 0) {
+      const shape = arcMarkup(cx, cy, star.celestialPower ? POWER_ARC_RADIUS : ARC_RADIUS, starMarks);
       marker = muted ? `<g filter="url(#mute-wide)">${shape}</g>` : shape;
     }
     parts.push(
-      `<circle data-star-id="${star.id}" class="hit ${st}" cx="${cx}" cy="${cy}" r="${HIT_RADIUS}"/>${dot}${marker}`,
+      `<circle data-star-id="${star.id}" class="hit ${st}" cx="${cx}" cy="${cy}" r="${HIT_RADIUS}"/>${marker}${dot}`,
     );
   }
 
@@ -475,7 +495,8 @@ export function renderSvgMarkup(model: DevotionModel, state: SelectionState, opt
 
 /** Per-render inputs for a mounted map, mirroring RenderOpts minus the boot-time manifest. */
 export interface UpdateOpts {
-  rings?: ReadonlyMap<StarId, readonly RingMark[]>;
+  marks?: ReadonlyMap<StarId, readonly StarMark[]>;
+  queryColor?: string;
   reach?: ReachView;
   diff?: { added: Set<StarId>; removed: Set<StarId> } | null;
   affinityFilter?: { grants: Set<Affinity>; requires: Set<Affinity> };
@@ -492,6 +513,9 @@ export interface SvgHandle {
   // Emphasize (or clear, with null) a single star with the benefit-match treatment (enlarged + halo),
   // on top of every layer. Used for side-panel power-row hover so the power's own star pops on the map.
   highlightStar(id: string | null): void;
+  // Pulse every arc of the given style slots (the .pulse CSS animation), so hovering a legend row
+  // shows which arcs on the map are that search's. An empty list only clears.
+  pulseMarks(slots: readonly number[]): void;
 }
 export type HoverTarget = { kind: "star" | "constellation"; id: string } | null;
 export interface SvgDeps {
@@ -603,6 +627,21 @@ export function mountSvg(container: HTMLElement, model: DevotionModel, deps: Svg
     live.appendChild(shape);
   }
 
+  // Pulse the arcs of the given slots: the .pulse class runs the CSS animation and is removed when
+  // it ends, so a later hover can pulse again. Any pulse still running is cut first.
+  function pulseMarks(slots: readonly number[]) {
+    const live = container.querySelector("svg") as SVGSVGElement | null;
+    if (!live) return;
+    live.querySelectorAll(".search-arc.pulse").forEach((el) => {
+      el.classList.remove("pulse");
+    });
+    if (slots.length === 0) return;
+    live.querySelectorAll(slots.map((s) => `.search-arc[data-slot="${s}"]`).join(",")).forEach((el) => {
+      el.classList.add("pulse");
+      el.addEventListener("animationend", () => el.classList.remove("pulse"), { once: true });
+    });
+  }
+
   return {
     svg,
     update(state, opts) {
@@ -614,5 +653,6 @@ export function mountSvg(container: HTMLElement, model: DevotionModel, deps: Svg
     },
     highlightCon,
     highlightStar,
+    pulseMarks,
   };
 }

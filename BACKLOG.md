@@ -108,28 +108,33 @@ Pointers: rows carry `data-vid` (the same id space as `selectedBenefits` /
 to the same toggle (the popover already commits via a `pointerup` delegate on
 `tooltipEl`).
 
-## Search rings: deferred follow-ups
+## Search arcs: deferred follow-ups
 
 Shipped: each selected benefit tag and the text query is its own search with its
-own ring style (color + stroke dash pattern); matched stars wear a split ring
-(full circle for one search, arcs for several), the sidebar rows and search box
-are outlined in the same colors with mini patterned ring swatches, and the
-query's constellation halo is tinted its reserved color. See
-`docs/display-model.md` (emphasis channel), `web/src/core/searchRings.ts`,
-`web/src/adapters/ringPalette.ts`.
+own mark style (a fixed angle plus a color, by slot); matched stars wear one
+half-ring arc per search centred on its angle, overlaps split at the bisector,
+width the star's relative magnitude; the sidebar rows and search box are
+outlined in the same colors with mini-star swatches; hovering a legend row
+pulses its arcs. See `docs/display-model.md` (emphasis channel),
+`web/src/core/searchMarks.ts`, `web/src/adapters/markPalette.ts`, and the design
+records `docs/superpowers/specs/2026-09-01-search-hands-design.md` and
+`docs/superpowers/specs/2026-09-01-search-arcs-design.md`.
 
-- **Hover a benefit row to isolate its search on the map.** Dim every other
-  search's rings while hovering a selected row (or the search box), so a color
-  can be disambiguated without reading hues. Pointers: `powerRowHover` in
-  `web/src/app/main.ts` shows the pattern (container-level mousemove surviving
-  innerHTML re-renders); rather than a full `paintMap()` per hover, tag ring
-  groups with their search key in `ringMarkup` (`web/src/adapters/svgRenderer.ts`)
-  and toggle a dim class on non-matching `.search-ring` children.
+- **Hold to solo.** While a row is held, drop every other slot's arcs to 20%
+  opacity so one search can be read alone. Same wiring as the hover pulse
+  (`tagRowHover` in `web/src/app/main.ts`, `pulseMarks` on the map handle).
+- **Zoom level of detail.** Below the zoom where the track ring renders under
+  about 20 px, arcs are noise; collapse a star's arcs to one presence halo
+  (white, or the heaviest slot's color). Only if whole-map zoom looks bad.
+- **Slot order in the URL.** A fresh load reseeds mark slots canonically, so a
+  shared link can show the same searches with different arcs than the sender
+  saw. Encoding the slot per search is about 5 bits each through `hashCodec.ts`
+  / `urlState.ts`; do it only if it comes up in practice.
 - **Tooltip affinity lines keep the neutral blue selected outline.** Tagged
-  bonus rows in the tooltip wear their ring style (see `setRingStyles` in
+  bonus rows in the tooltip wear their mark style (see `setMarkStyles` in
   `web/src/adapters/tooltipView.ts`), but the Grants/Requires affinity lines
   still outline blue when tagged - affinity tags are constellation-level filters
-  with no ring style, which is consistent, just worth knowing.
+  with no mark style, which is consistent, just worth knowing.
 
 ## Affinities as filter values
 

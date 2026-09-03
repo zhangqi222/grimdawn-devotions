@@ -8,7 +8,7 @@ import { affinityOrb } from "./affinityColors";
 import { affinityTagId, petTagId } from "../core/benefitTag";
 import { benefitRows, type BenefitGroup, type BenefitSubject } from "../core/benefitRows";
 import { resolveText, sortByResolved, gameT } from "../core/localization";
-import { ringSwatchSvg, type RingStyle } from "./ringPalette";
+import { markSwatchSvg, type MarkStyle } from "./markPalette";
 import type { Localization } from "../ports/Localization";
 
 // One row per celestial power: the name plus a data-star-id hook so a hover shows the power's full
@@ -31,7 +31,7 @@ function changeClass(prev: Record<string, number> | undefined, key: string, cur:
 
 // One unified row renderer for both modes. comparing=false -> a single value cell (+ flash);
 // comparing=true -> Base/Now/Delta cells. selectedBenefits drives the row highlight (outlined in
-// the tag's search-ring color via --ring, keyed by its patterned swatch); flash adds the
+// the tag's search-mark color via --mark, keyed by its mini-star swatch); flash adds the
 // per-render up/down change class (regular mode only).
 function benefitListHtml(
   loc: Localization,
@@ -40,7 +40,7 @@ function benefitListHtml(
   selectedBenefits: Set<string>,
   keyOf: (id: string) => string,
   flash: (id: string) => string,
-  ringStyles: Map<string, RingStyle>,
+  markStyles: Map<string, MarkStyle>,
 ): string {
   const cells = (r: BenefitGroup["subjects"][number]["rows"][number]) =>
     comparing
@@ -48,15 +48,15 @@ function benefitListHtml(
       : `<span class="brow-v${flash(r.id)}">${resolveText(loc, r.now)}</span>`;
   const rowHtml = (s: BenefitSubject, subject: string, r: BenefitGroup["subjects"][number]["rows"][number]) => {
     const vid = keyOf(r.id);
-    const st = selectedBenefits.has(vid) ? ringStyles.get(vid) : undefined;
+    const st = selectedBenefits.has(vid) ? markStyles.get(vid) : undefined;
     const sel = selectedBenefits.has(vid) ? " vsel" : "";
-    const ring = st ? ` style="--ring:${st.color}"` : "";
-    const swatch = st ? ringSwatchSvg(st) : "";
+    const mark = st ? ` style="--mark:${st.color}"` : "";
+    const swatch = st ? markSwatchSvg(st) : "";
     if (r.role === "subject") {
       const ids = s.ids.map(keyOf);
       const vtint = comparing && s.verdict ? ` ${s.verdict}` : "";
       return (
-        `<div class="brow${sel}" data-gkey="${keyOf(s.key)}" data-ids="${ids.join(",")}"${ring}>` +
+        `<div class="brow${sel}" data-gkey="${keyOf(s.key)}" data-ids="${ids.join(",")}"${mark}>` +
         `<span class="brow-lbl subj${vtint}" data-gtoggle title="${subject}">${swatch}${subject}</span>` +
         `<span class="brow-vals" data-vid="${vid}">${cells(r)}</span></div>`
       );
@@ -65,7 +65,7 @@ function benefitListHtml(
       r.role === "sub"
         ? `<span class="brow-lbl sub">${swatch}${resolveText(loc, r.subLabel)}</span>`
         : `<span class="brow-lbl cont">${swatch}</span>`;
-    return `<div class="brow${sel}" data-vid="${vid}"${ring}>${lbl}<span class="brow-vals">${cells(r)}</span></div>`;
+    return `<div class="brow${sel}" data-vid="${vid}"${mark}>${lbl}<span class="brow-vals">${cells(r)}</span></div>`;
   };
   return groups
     .map((g) => {
@@ -100,7 +100,7 @@ export function renderBenefits(
   petCatalog: CondensedGroup[] = [],
   availablePetKeys?: Set<string>,
   baselineSelected: Set<StarId> | null = null,
-  ringStyles: Map<string, RingStyle> = new Map(),
+  markStyles: Map<string, MarkStyle> = new Map(),
 ): { bonuses: Record<string, number>; petBonuses: Record<string, number>; availHtml: string; petAvailHtml: string } {
   const bonuses = sumBonuses(model, selected);
   const petBonuses = sumPetBonuses(model, selected);
@@ -120,9 +120,13 @@ export function renderBenefits(
     const rawIds = (s: CondensedSubject) => catIds.get(s.key) ?? s.parts.map((p) => p.id);
     const keys = (s: CondensedSubject) => rawIds(s).map(keyOf);
     const gkey = (s: CondensedSubject) => keyOf(s.key);
+    // A chip counts as tagged when any of its ids is (there is no per-value view to show which),
+    // and as partial when not all are, so a stray single tag stays visible and clearable.
     const groupSel = (s: CondensedSubject) => {
       const k = keys(s);
-      return k.length > 0 && k.every((x) => selectedBenefits.has(x)) ? " gsel" : "";
+      const tagged = k.filter((x) => selectedBenefits.has(x)).length;
+      if (tagged === 0) return "";
+      return tagged === k.length ? " gsel" : " gsel partial";
     };
     return { keys, gkey, groupSel };
   }
@@ -149,9 +153,9 @@ export function renderBenefits(
     selectedBenefits,
     (id) => id,
     flashPlayer,
-    ringStyles,
+    markStyles,
   );
-  const petActiveHtml = benefitListHtml(loc, rows.pet, comparing, selectedBenefits, petTagId, flashPet, ringStyles);
+  const petActiveHtml = benefitListHtml(loc, rows.pet, comparing, selectedBenefits, petTagId, flashPet, markStyles);
   const activeKeys = activeKeysOf(condensedRows(bonuses, { racialTarget: racialTargets(model, selected) }));
   const petActiveKeys = activeKeysOf(condensedRows(petBonuses));
 
@@ -176,13 +180,13 @@ export function renderBenefits(
           (s) => s.subject,
         )
           .map((s) => {
-            // A fully tagged chip is outlined and keyed like the active rows; a chip toggling
-            // several tags shows its first tag's style (the map's split ring carries the full story).
-            const firstKey = scope.keys(s).find((k) => selectedBenefits.has(k) && ringStyles.has(k));
-            const st = scope.groupSel(s) && firstKey ? ringStyles.get(firstKey) : undefined;
-            const ring = st ? ` style="--ring:${st.color}"` : "";
-            const swatch = st ? ringSwatchSvg(st) : "";
-            return `<div class="bgroup avail${scope.groupSel(s)}" data-gkey="${scope.gkey(s)}" data-ids="${scope.keys(s).join(",")}"${ring}><span class="bsubj" data-gtoggle>${swatch}${resolveText(loc, s.subject)}</span></div>`;
+            // A tagged chip (fully or partly) is outlined and keyed like the active rows; a chip
+            // covering several tags shows its first tagged id's style (the map's arcs carry the rest).
+            const firstKey = scope.keys(s).find((k) => selectedBenefits.has(k) && markStyles.has(k));
+            const st = firstKey ? markStyles.get(firstKey) : undefined;
+            const mark = st ? ` style="--mark:${st.color}"` : "";
+            const swatch = st ? markSwatchSvg(st) : "";
+            return `<div class="bgroup avail${scope.groupSel(s)}" data-gkey="${scope.gkey(s)}" data-ids="${scope.keys(s).join(",")}"${mark}><span class="bsubj" data-gtoggle>${swatch}${resolveText(loc, s.subject)}</span></div>`;
           })
           .join("");
         return subs ? `<h3>${loc.translate(GROUP_KEY[g.group])}</h3><div class="avail-list">${subs}</div>` : "";

@@ -358,9 +358,9 @@ main {
 .tip-bonus.vsel,
 .aff.vsel {
   background: rgba(108, 182, 255, 0.08);
-  /* --ring is the row's search-ring color (set inline by the view when the tag rings stars);
+  /* --mark is the row's search-mark color (set inline by the view when the tag marks stars);
      rows without one (affinity tags, tooltips) keep the neutral blue. */
-  box-shadow: 0 0 0 2px var(--ring, rgba(108, 182, 255, 0.6));
+  box-shadow: 0 0 0 2px var(--mark, rgba(108, 182, 255, 0.6));
 }
 .bsubj {
   text-transform: capitalize;
@@ -526,6 +526,12 @@ main {
 .bgroup.avail.gsel .bsubj {
   color: #cfe8ff;
 }
+/* Only some of the chip's ids are tagged: still on (a click clears them), but dashed. */
+.bgroup.avail.gsel.partial {
+  box-shadow: none;
+  outline: 2px dashed var(--mark, rgba(108, 182, 255, 0.6));
+  outline-offset: -1px;
+}
 .affinity > span:first-child {
   text-transform: capitalize;
 }
@@ -615,11 +621,11 @@ main {
 #search-input::placeholder {
   color: #6b7688;
 }
-/* An active query wears the query's ring color (--ring, set inline by the panel), matching its
-   star rings and constellation halo on the map. Focus keeps its blue border only while idle. */
+/* An active query wears the query's mark color (--mark, set inline by the panel), matching its
+   star arcs and constellation halo on the map. Focus keeps its blue border only while idle. */
 #search-input.qactive {
   border-color: transparent;
-  box-shadow: 0 0 0 2px var(--ring);
+  box-shadow: 0 0 0 2px var(--mark);
 }
 #search-input:focus {
   outline: none;
@@ -914,22 +920,40 @@ main {
   /* SVG-native halo (see #match-glow in the renderer); CSS drop-shadow on SVG fails on WebKit/iOS. */
   filter: url(#match-glow);
 }
-/* Search rings: the split-ring marker around a star matched by one or more searches. Geometry
-   (radius, arc spans, per-search stroke colors) is data-driven in the renderer; the tunable look
-   (stroke weight, the luminous #self-glow halo) lives here. */
-.search-ring {
+/* Search arcs: the half-ring marker on a star matched by one or more searches. Geometry (radii,
+   angular extents, rounded corners, per-arc widths and fills) is data-driven in the renderer; the
+   tunable look here is the faint track ring that shows where no arc is. */
+.search-arcs {
   pointer-events: none;
-  filter: url(#self-glow);
 }
-.search-ring circle,
-.search-ring path {
+.arc-track {
   fill: none;
-  /* stroke-width is a per-arc attribute in the renderer: base 8, up to double with magnitude. */
-  stroke-linecap: round;
+  stroke: #fff;
+  stroke-opacity: 0.18;
+  stroke-width: 1;
 }
-/* The legend swatch: a mini ring in a search's color + dash, keying rows, chips, and the
-   search box to the map's ring styles. */
-.ring-swatch {
+/* Hovering a legend row pulses its search's arcs for about five seconds (pulseMarks on the map
+   handle): an opacity dip rather than a size change, so the arc geometry stays readable mid-pulse. */
+@keyframes mark-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+.search-arc.pulse {
+  animation: mark-pulse 1s ease-in-out 5;
+}
+@media (prefers-reduced-motion: reduce) {
+  .search-arc.pulse {
+    animation: none;
+  }
+}
+/* The legend swatch: a mini star wearing a quarter arc centred on a search's angle in its color,
+   keying rows, chips, and the search box to the map's arcs. */
+.mark-swatch {
   vertical-align: -2.5px;
   margin-right: 4px;
   flex: none;
